@@ -1,10 +1,9 @@
-
+# core/io.py
 from __future__ import annotations
 import pandas as pd
-import io
 from typing import Optional
 
-def _read_csv(file, delimiter: Optional[str]=None) -> pd.DataFrame:
+def _read_csv(file, delimiter: Optional[str] = None) -> pd.DataFrame:
     return pd.read_csv(file, sep=delimiter if delimiter else None, engine="python")
 
 def _read_excel(file) -> pd.DataFrame:
@@ -16,8 +15,8 @@ def _read_parquet(file) -> pd.DataFrame:
     except Exception as e:
         raise RuntimeError("Lettura Parquet fallita: installare 'pyarrow'") from e
 
-def read_any(file, delimiter: Optional[str]=None) -> pd.DataFrame:
-    \"\"\"Legge CSV/XLSX/Parquet in un DataFrame pandas.\"\"\"
+def read_any(file, delimiter: Optional[str] = None) -> pd.DataFrame:
+    """Legge CSV/XLSX/Parquet in un DataFrame pandas."""
     name = getattr(file, "name", "").lower()
     if name.endswith(".csv"):
         return _read_csv(file, delimiter)
@@ -28,7 +27,7 @@ def read_any(file, delimiter: Optional[str]=None) -> pd.DataFrame:
     raise ValueError("Formato file non supportato. Usa .csv, .xlsx o .parquet")
 
 def load_sample(sample: str = "clinical_demo", n: int = 200) -> pd.DataFrame:
-    \"\"\"Genera un dataset di esempio sintetico realistico (clinico).\"\"\"
+    """Genera un dataset di esempio sintetico realistico (clinico)."""
     import numpy as np
     rng = np.random.default_rng(42)
     sex = rng.choice(["F", "M"], size=n)
