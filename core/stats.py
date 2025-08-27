@@ -10,6 +10,8 @@ try:
 except Exception:
     spstats = None  # Box-Cox opzionale
 
+# ------------------ Trasformazioni & continue ------------------
+
 @dataclass
 class TransformInfo:
     name: str
@@ -53,6 +55,7 @@ def summarize_continuous(
     exclude_outliers: bool = False,
     transform: Optional[str] = None,
 ) -> pd.DataFrame:
+    """Statistiche descrittive per variabili continue (con outlier IQR e trasformazioni)."""
     if cols is None:
         cols = list(df.select_dtypes(include="number").columns)
     out_rows = []
@@ -106,11 +109,22 @@ def summarize_continuous(
     desired = ["variable","n","n_used","n_outliers","mean","sd","min","p25","median","p75","max","missing_pct","transform","shift","boxcox_lambda"]
     return df_out[desired]
 
-def summarize_categorical(
+# ------------------ Categoriche: distribuzioni complete ------------------
+
+def summarize_categorical_full(
     df: pd.DataFrame,
     cols: Optional[Iterable[str]] = None,
+    denominator: str = "total",  # "total" (default) oppure "valid"
+    sort_desc: bool = True,
 ) -> pd.DataFrame:
-    """Distribuzione completa di frequenze e percentuali per ciascuna variabile categorica."""
+    """
+    Distribuzione completa (tutte le categorie) per ciascuna variabile categorica.
+    - Frequenze assolute sempre sul conteggio reale.
+    - Percentuali calcolate su:
+        * "total": totale osservazioni della variabile (inclusi i missing)
+        * "valid": soli valori non-mancanti
+    - Aggiunge una riga "(Missing)" se presenti NA (la % dei missing è sempre su 'total').
+    """
     if cols is None:
         cols = list(df.select_dtypes(include=["object","category","bool"]).columns)
 
@@ -118,25 +132,37 @@ def summarize_categorical(
     for c in cols:
         s = df[c]
         n_total = int(s.size)
+        n_valid = int(s.notna().sum())
         n_missing = int(s.isna().sum())
         if n_total == 0:
             continue
+
+        denom = n_total if denominator == "total" else max(n_valid, 1)
+
+        # Frequenze per categoria (solo valori non-mancanti)
         freq_table = s.value_counts(dropna=True)
+        if sort_desc:
+            freq_table = freq_table.sort_values(ascending=False)
+
         for cat, freq in freq_table.items():
-            pct = freq / n_total * 100.0
+            pct = freq / denom * 100.0
             rows.append({
                 "Variabile": c,
                 "Categoria": str(cat),
                 "Frequenza": int(freq),
-                "%": round(pct, 1)
+                "%": round(pct, 1),
             })
+
+        # Riga missing (se presente): % sempre sul totale
         if n_missing > 0:
             rows.append({
                 "Variabile": c,
                 "Categoria": "(Missing)",
                 "Frequenza": n_missing,
-                "%": round(n_missing / n_total * 100.0, 1)
+                "%": round(n_missing / n_total * 100.0, 1),
             })
 
     out = pd.DataFrame(rows)
+    if out.empty:
+        return pd.DataFrame(columns=["Variabile","Categoria","Frequenza","%"])
     return out[["Variabile","Categoria","Frequenza","%"]]
