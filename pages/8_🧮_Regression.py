@@ -95,7 +95,7 @@ def _qq_plot(residuals: np.ndarray):
 # Init & checks
 # -----------------------------
 init_state()
-st.title("🧮 Step 8 — Regressione lineare e logistica")
+st.title("🧮 Step 8 — Regressione lineare, logistica e Poisson")
 
 if "df" not in st.session_state or st.session_state.df is None:
     st.warning("Nessun dataset disponibile. Carichi i dati in **Step 0 — Upload Dataset**.")
@@ -115,35 +115,48 @@ target = st.selectbox("Variabile di outcome:", options=list(df.columns))
 
 model_type = st.radio(
     "Tipo di regressione:",
-    options=["Lineare (OLS)", "Logistica (binaria)", "Logistica regolarizzata (L1/L2)"],
+    options=["Lineare (OLS)", "Logistica (binaria)", "Logistica regolarizzata (L1/L2)", "Poisson (conteggi)"],
     horizontal=True
 )
 
-# vincoli per logistica
-if model_type != "Lineare (OLS)":
+with st.expander("ℹ️ Quale modello scegliere?", expanded=False):
+    st.markdown("""
+- **Lineare (OLS)** → outcome **continuo** (es. pressione, peso); assunzioni: linearità, normalità dei residui, omoscedasticità.  
+- **Logistica (binaria)** → outcome **0/1** o due categorie (es. evento sì/no); output come **Odds Ratio**.  
+- **Logistica regolarizzata (L1/L2)** → come la logistica, con **penalizzazione** per ridurre overfitting/collinearità.  
+- **Poisson (GLM)** → outcome = **conteggio** di eventi (0,1,2,...) con varianza ≈ media; output come **IRR** (Incidence Rate Ratio).  
+""")
+
+# Vincoli specifici dei modelli
+if model_type in ("Logistica (binaria)", "Logistica regolarizzata (L1/L2)"):
     if not _is_binary_series(df[target]) and df[target].dropna().nunique() > 2:
         st.error("Per la regressione logistica l’outcome deve essere **binario** (esattamente due livelli).")
+        st.stop()
+
+if model_type == "Lineare (OLS)":
+    # outcome deve essere numerico
+    if not pd.api.types.is_numeric_dtype(df[target]):
+        st.error("Per la regressione lineare l'outcome deve essere **numerico**.")
+        st.stop()
+
+if model_type == "Poisson (conteggi)":
+    # outcome deve essere intero (conteggi)
+    if not pd.api.types.is_integer_dtype(df[target]):
+        st.error("Per la regressione di Poisson l'outcome deve essere **numerico intero (conteggi)**.")
         st.stop()
 
 # predittori
 candidate_preds = [c for c in df.columns if c != target]
 X_sel = st.multiselect("Seleziona i predittori (può scegliere più variabili):", candidate_preds)
-
 if not X_sel:
     st.info("Selezioni almeno un predittore per stimare il modello.")
     st.stop()
 
-# -----------------------------
-# Regressione LINEARE (OLS, SE robusti)
-# -----------------------------
+# ===========================================================
+#                     LINEARE (OLS)
+# ===========================================================
 if model_type == "Lineare (OLS)":
-    # y deve essere numerica
-    if not pd.api.types.is_numeric_dtype(df[target]):
-        st.error("Per la regressione lineare l'outcome deve essere **numerico**.")
-        st.stop()
-
     y, X = _make_design_matrix(df, target, X_sel, dropna=True)
-
     if X.shape[0] < 5 or X.shape[1] < 2:
         st.error("Dati insufficienti per stimare il modello (pochi casi o nessun predittore dopo la codifica).")
         st.stop()
@@ -175,24 +188,26 @@ if model_type == "Lineare (OLS)":
     st.markdown("**Coefficienti (IC95% e p-value)**")
     st.dataframe(df_coefs.round(4), use_container_width=True)
 
-    # Diagnostica
+    # Diagnostica affiancata
     st.subheader("Diagnostica modello")
-
-    # Residui vs Fitted
     resid = model.resid.values
     fitted = model.fittedvalues.values
-    fig1 = px.scatter(x=fitted, y=resid, labels={"x": "Fitted", "y": "Residui"}, title="Residui vs Fitted")
-    fig1.add_hline(y=0, line_dash="dash")
-    st.plotly_chart(fig1, use_container_width=True)
-    st.caption("**Come leggere — Residui vs Fitted:** i punti dovrebbero distribuirsi casualmente attorno a 0 senza pattern. "
-               "Strutture a ventaglio o curve indicano possibili violazioni (non linearità/eteroscedasticità).")
 
-    # Q-Q plot (se SciPy presente)
-    figqq = _qq_plot(resid)
-    if figqq is not None:
-        st.plotly_chart(figqq, use_container_width=True)
-        st.caption("**Come leggere — Q-Q plot dei residui:** i punti dovrebbero allinearsi alla diagonale. "
-                   "Deviazioni sistematiche indicano non normalità dei residui.")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        fig1 = px.scatter(x=fitted, y=resid, labels={"x": "Fitted", "y": "Residui"}, title="Residui vs Fitted")
+        fig1.add_hline(y=0, line_dash="dash")
+        st.plotly_chart(fig1, use_container_width=True)
+        st.caption("**Come leggere — Residui vs Fitted:** i punti dovrebbero distribuirsi casualmente attorno a 0 senza pattern. "
+                   "Strutture a ventaglio o curve indicano possibili violazioni (non linearità/eteroscedasticità).")
+
+    with col2:
+        figqq = _qq_plot(resid)
+        if figqq is not None:
+            st.plotly_chart(figqq, use_container_width=True)
+            st.caption("**Come leggere — Q-Q plot dei residui:** i punti dovrebbero allinearsi alla diagonale. "
+                       "Deviazioni sistematiche indicano non normalità dei residui.")
 
     # Shapiro-Wilk residui (se SciPy)
     if _HAS_SCIPY and len(resid) >= 3:
@@ -237,7 +252,7 @@ if model_type == "Lineare (OLS)":
         })
         st.success("Modello OLS aggiunto al Results Summary.")
 
-    # Guida interpretativa sintetica (riepilogo)
+    # Guida interpretativa (riepilogo)
     with st.expander("ℹ️ Come leggere i risultati (OLS)", expanded=False):
         st.markdown("""
 - **R² / R² adj.**: quota di varianza spiegata (R² adj. penalizza modelli troppo complessi).  
@@ -248,11 +263,10 @@ if model_type == "Lineare (OLS)":
 - **VIF**: collinearità alta inflaziona varianze dei coefficienti.
 """)
 
-# -----------------------------
-# Regressione LOGISTICA (binaria)
-# -----------------------------
+# ===========================================================
+#                 LOGISTICA (BINARIA)
+# ===========================================================
 elif model_type == "Logistica (binaria)":
-    # outcome binario: scelta della classe positiva
     y_raw = df[target]
     unique_vals = sorted(y_raw.dropna().unique().tolist(), key=lambda x: str(x))
     if len(unique_vals) != 2:
@@ -264,7 +278,6 @@ elif model_type == "Logistica (binaria)":
 
     # design matrix
     y, X = _make_design_matrix(df.assign(__y__=y_bin), "__y__", X_sel, dropna=True)
-
     if X.shape[0] < 10 or X.shape[1] < 2:
         st.error("Dati insufficienti per stimare il modello (pochi casi utili o nessun predittore dopo la codifica).")
         st.stop()
@@ -315,7 +328,7 @@ elif model_type == "Logistica (binaria)":
     }
     st.write(pd.DataFrame(info, index=["Valore"]).T)
 
-    # Valutazione predittiva
+    # Valutazione predittiva — grafici affiancati
     st.subheader("Valutazione predittiva")
     try:
         y_pred_prob = logit.predict(X)
@@ -327,27 +340,29 @@ elif model_type == "Logistica (binaria)":
     y_pred = (y_pred_prob >= thresh).astype(int)
 
     if _HAS_SKLEARN:
-        # ROC curve & AUC
         fpr, tpr, _ = roc_curve(y, y_pred_prob)
         auc_val = auc(fpr, tpr)
-        figroc = go.Figure()
-        figroc.add_trace(go.Scatter(x=fpr, y=tpr, mode="lines", name=f"ROC (AUC={auc_val:.3f})"))
-        figroc.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="lines", name="No skill", line=dict(dash="dash")))
-        figroc.update_layout(title="ROC curve", xaxis_title="FPR", yaxis_title="TPR")
-        st.plotly_chart(figroc, use_container_width=True)
-        st.caption("**Come leggere — ROC curve:** curva più lontana dalla diagonale indica migliore discriminazione. "
-                   "L’**AUC** riassume l’accuratezza indipendente dalla soglia (0.5 casuale; >0.7 accettabile; >0.8 buona; >0.9 eccellente).")
 
-        # Confusion matrix & metrics
-        cm = confusion_matrix(y, y_pred, labels=[1,0])
-        figcm = go.Figure(data=go.Heatmap(
-            z=cm, x=["Pred 1","Pred 0"], y=["True 1","True 0"],
-            text=cm, texttemplate="%{text}", colorscale="Blues"))
-        figcm.update_layout(title="Confusion matrix", xaxis_title="", yaxis_title="")
-        st.plotly_chart(figcm, use_container_width=True)
-        st.caption("**Come leggere — Confusion matrix:** TP (pred 1 | true 1), TN (pred 0 | true 0); "
-                   "FP e FN quantificano rispettivamente falsi allarmi e mancate identificazioni. "
-                   "Valutare anche Precision, Recall e F1 in funzione della soglia scelta.")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            figroc = go.Figure()
+            figroc.add_trace(go.Scatter(x=fpr, y=tpr, mode="lines", name=f"ROC (AUC={auc_val:.3f})"))
+            figroc.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="lines", name="No skill", line=dict(dash="dash")))
+            figroc.update_layout(title="ROC curve", xaxis_title="FPR", yaxis_title="TPR")
+            st.plotly_chart(figroc, use_container_width=True)
+            st.caption("**Come leggere — ROC curve:** più la curva si allontana dalla diagonale, migliore la discriminazione. "
+                       "L’AUC riassume l’accuratezza indipendente dalla soglia (0.5 casuale; >0.7 accettabile; >0.8 buona; >0.9 eccellente).")
+
+        with col2:
+            cm = confusion_matrix(y, y_pred, labels=[1,0])
+            figcm = go.Figure(data=go.Heatmap(
+                z=cm, x=["Pred 1","Pred 0"], y=["True 1","True 0"],
+                text=cm, texttemplate="%{text}", colorscale="Blues"))
+            figcm.update_layout(title="Confusion matrix", xaxis_title="", yaxis_title="")
+            st.plotly_chart(figcm, use_container_width=True)
+            st.caption("**Come leggere — Confusion matrix:** TP (pred 1 | true 1), TN (pred 0 | true 0). "
+                       "FP e FN quantificano errori; osservare Precision, Recall e F1 per bilanciare la soglia.")
 
         prec, rec, f1, _ = precision_recall_fscore_support(y, y_pred, average="binary", zero_division=0)
         st.write(pd.DataFrame({"Precision": [prec], "Recall": [rec], "F1": [f1], "Accuracy":[(y==y_pred).mean()]}).round(3))
@@ -374,7 +389,7 @@ elif model_type == "Logistica (binaria)":
         })
         st.success("Modello logit aggiunto al Results Summary.")
 
-    # Guida interpretativa sintetica
+    # Guida interpretativa
     with st.expander("ℹ️ Come leggere i risultati (Logistica)", expanded=False):
         st.markdown(f"""
 - **Odds Ratio (OR)**: effetto moltiplicativo sul **rapporto di odds** della classe positiva (**{positive_class}**).  
@@ -384,10 +399,10 @@ elif model_type == "Logistica (binaria)":
 - **Confusion matrix / Precision / Recall / F1**: dipendono dalla **soglia** scelta.
 """)
 
-# -----------------------------
-# Regressione LOGISTICA REGOLARIZZATA (L1/L2)
-# -----------------------------
-else:  # "Logistica regolarizzata (L1/L2)"
+# ===========================================================
+#          LOGISTICA REGOLARIZZATA (L1/L2)
+# ===========================================================
+elif model_type == "Logistica regolarizzata (L1/L2)":
     if not _HAS_SKLEARN:
         st.error("Per la logistica regolarizzata è necessario `scikit-learn`.")
         st.stop()
@@ -427,7 +442,7 @@ else:  # "Logistica regolarizzata (L1/L2)"
     st.caption("**Come leggere — Coefficienti penalizzati:** la penalizzazione riduce overfitting e collinearità; "
                "i coefficienti piccoli possono essere spinti verso 0 (soprattutto con L1).")
 
-    # Prestazioni
+    # Prestazioni — grafici affiancati
     st.subheader("Valutazione predittiva")
     y_pred_prob = pipe.predict_proba(X)[:, 1]
     thresh = st.slider("Soglia di classificazione", 0.05, 0.95, 0.50, step=0.01, key="thresh_reg")
@@ -436,21 +451,27 @@ else:  # "Logistica regolarizzata (L1/L2)"
     if _HAS_SKLEARN:
         fpr, tpr, _ = roc_curve(y, y_pred_prob)
         auc_val = auc(fpr, tpr)
-        figroc = go.Figure()
-        figroc.add_trace(go.Scatter(x=fpr, y=tpr, mode="lines", name=f"ROC (AUC={auc_val:.3f})"))
-        figroc.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="lines", name="No skill", line=dict(dash="dash")))
-        figroc.update_layout(title="ROC curve", xaxis_title="FPR", yaxis_title="TPR")
-        st.plotly_chart(figroc, use_container_width=True)
-        st.caption("**Come leggere — ROC curve:** come sopra; l’AUC riassume la discriminazione del modello su tutte le soglie.")
 
-        cm = confusion_matrix(y, y_pred, labels=[1,0])
-        figcm = go.Figure(data=go.Heatmap(
-            z=cm, x=["Pred 1","Pred 0"], y=["True 1","True 0"],
-            text=cm, texttemplate="%{text}", colorscale="Blues"))
-        figcm.update_layout(title="Confusion matrix", xaxis_title="", yaxis_title="")
-        st.plotly_chart(figcm, use_container_width=True)
-        st.caption("**Come leggere — Confusion matrix:** bilanci il trade-off tra FP e FN regolando la soglia; "
-                   "osservi l’impatto su Precision, Recall e F1 riportati sotto.")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            figroc = go.Figure()
+            figroc.add_trace(go.Scatter(x=fpr, y=tpr, mode="lines", name=f"ROC (AUC={auc_val:.3f})"))
+            figroc.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="lines", name="No skill", line=dict(dash="dash")))
+            figroc.update_layout(title="ROC curve", xaxis_title="FPR", yaxis_title="TPR")
+            st.plotly_chart(figroc, use_container_width=True)
+            st.caption("**Come leggere — ROC curve:** l’AUC riassume la discriminazione del modello su tutte le soglie.")
+
+        with col2:
+            cm = confusion_matrix(y, y_pred, labels=[1,0])
+            figcm = go.Figure(data=go.Heatmap(
+                z=cm, x=["Pred 1","Pred 0"], y=["True 1","True 0"],
+                text=cm, texttemplate="%{text}", colorscale="Blues"))
+            figcm.update_layout(title="Confusion matrix", xaxis_title="", yaxis_title="")
+            st.plotly_chart(figcm, use_container_width=True)
+            st.caption("**Come leggere — Confusion matrix:** regoli la soglia per bilanciare FP e FN; "
+                       "osservi l’impatto su Precision, Recall e F1.")
+
         prec, rec, f1, _ = precision_recall_fscore_support(y, y_pred, average="binary", zero_division=0)
         st.write(pd.DataFrame({"Precision": [prec], "Recall": [rec], "F1": [f1], "Accuracy":[(y==y_pred).mean()]}).round(3))
     else:
@@ -471,3 +492,75 @@ else:  # "Logistica regolarizzata (L1/L2)"
             }
         })
         st.success("Modello logit regolarizzato aggiunto al Results Summary.")
+
+# ===========================================================
+#                     POISSON (GLM)
+# ===========================================================
+else:  # "Poisson (conteggi)"
+    # y intero (conteggi) già verificato sopra
+    y, X = _make_design_matrix(df, target, X_sel, dropna=True)
+    if X.shape[0] < 10 or X.shape[1] < 2:
+        st.error("Dati insufficienti per stimare il modello di Poisson.")
+        st.stop()
+
+    try:
+        model = sm.GLM(y, X, family=sm.families.Poisson()).fit()
+    except Exception as e:
+        st.error(f"Errore nella stima del modello di Poisson: {e}")
+        st.stop()
+
+    st.subheader("Risultati modello (GLM Poisson)")
+
+    # Coefficienti → IRR con IC95%
+    params = model.params
+    conf = model.conf_int()
+    irr = np.exp(params)
+    irr_lo = np.exp(conf[0])
+    irr_hi = np.exp(conf[1])
+    pvals = model.pvalues
+
+    df_irr = pd.DataFrame({
+        "term": params.index,
+        "IRR": irr.values,
+        "CI 2.5%": irr_lo.values,
+        "CI 97.5%": irr_hi.values,
+        "p-value": pvals.values
+    })
+    st.markdown("**Incidence Rate Ratio (IRR, IC95%) e p-value**")
+    st.dataframe(df_irr.round(4), use_container_width=True)
+
+    # Info generali
+    info = {
+        "N": int(model.nobs),
+        "Deviance": float(model.deviance),
+        "Pearson Chi2": float(model.pearson_chi2),
+        "AIC": float(model.aic)
+    }
+    st.write(pd.DataFrame(info, index=["Valore"]).T)
+
+    # ➕ Salva nel Results Summary
+    if st.button("➕ Aggiungi risultati Poisson al Results Summary"):
+        if "report_items" not in st.session_state:
+            st.session_state.report_items = []
+        st.session_state.report_items.append({
+            "type": "regression_poisson",
+            "title": f"Regressione Poisson — {target}",
+            "content": {
+                "nobs": int(model.nobs),
+                "deviance": float(model.deviance),
+                "pearson_chi2": float(model.pearson_chi2),
+                "aic": float(model.aic),
+                "irr": df_irr.round(6).to_dict(orient="records")
+            }
+        })
+        st.success("Modello di Poisson aggiunto al Results Summary.")
+
+    # Guida interpretativa
+    with st.expander("ℹ️ Come leggere i risultati (Poisson)", expanded=False):
+        st.markdown("""
+- **IRR (Incidence Rate Ratio)**: effetto moltiplicativo sul **tasso atteso** di eventi.  
+  - **IRR > 1** → aumento del numero atteso di eventi; **IRR < 1** → diminuzione.  
+  - Se l’**IC95%** non include 1, l’effetto è statisticamente significativo.  
+- **Deviance** / **Pearson Chi2**: misure di bontà di adattamento; valori molto elevati possono indicare **overdispersione** (valutare quasi-Poisson o Negative Binomial).  
+- **AIC**: confronto tra modelli (più basso = migliore compromesso qualità/complessità).
+""")
