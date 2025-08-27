@@ -1,68 +1,85 @@
+
 import streamlit as st
 import pandas as pd
-import numpy as np
-import os
+from core.state import init_state
+from core.io import read_any, load_sample
+from core.validate import dataset_diagnostics
+from core.ui import quality_alert, show_missing_table
 
-# --- Upload Dataset --- #
-st.title("Step 1: Upload Your Dataset")
+init_state()
+
+st.title("📂 Step 1 — Upload Dataset")
 
 st.markdown("""
-### File Requirements:
-- Each **row** should represent one observation (e.g., a patient).
-- Each **column** should be a variable (e.g., Age, Sex, BMI).
-- Supported formats: `.csv`, `.xlsx` (Excel files).
-- Maximum file size: **200 MB**.
-
-**Example of expected headers:**
-```csv
-ID,Age,Sex,BMI,Diagnosis
-1,34,M,23.5,Control
-2,28,F,20.1,Anorexia
-```
+Carichi un file **CSV**, **Excel (.xlsx/.xls)** o **Parquet**.
+- Ogni riga = un'osservazione (es. paziente)
+- Ogni colonna = variabile (es. Età, Sesso, BMI)
+- Dimensione massima consigliata: ~200 MB
 """)
 
-example_df = pd.DataFrame({
-    "ID": [1, 2, 3],
-    "Age": [34, 28, 45],
-    "Sex": ["M", "F", "F"],
-    "BMI": [23.5, 20.1, 27.3],
-    "Diagnosis": ["Control", "Anorexia", "Bulimia"]
-})
-st.markdown("#### Example Dataset Preview")
-st.dataframe(example_df, use_container_width=True)
+with st.expander("Suggerimenti sul formato", expanded=False):
+    st.markdown("""
+- Eviti header duplicati o celle unite in Excel.
+- Per CSV, usi separatore **virgola** o **punto e virgola**.
+- Le date in formato ISO (es. `2024-03-01`).
+""")
 
-file_type = st.radio("Select file type", ["CSV", "Excel (.xlsx)"])
-uploaded_file = st.file_uploader("Upload your dataset file (max 200 MB)", type=["csv", "xlsx"])
+c1, c2 = st.columns([2,1])
+with c1:
+    file = st.file_uploader("Selezioni un file", type=["csv","xlsx","xls","parquet"])
+with c2:
+    st.markdown("**Oppure**")
+    if st.button("Usa dataset di esempio"):
+        df_demo = load_sample()
+        st.session_state.df = df_demo
+        st.session_state.diagnostics = dataset_diagnostics(df_demo)
+        st.success("Dataset di esempio caricato.")
+        st.experimental_rerun()
 
-if uploaded_file:
-    file_size_mb = uploaded_file.size / (1024 * 1024)
-    st.info(f"File size: {file_size_mb:.2f} MB")
-    if uploaded_file.size > 200 * 1024 * 1024:
-        st.error("File too large. The maximum allowed size is 200 MB.")
-    else:
-        try:
-            if file_type == "CSV":
-                use_header = st.checkbox("Use the first row as column headers", value=True)
-                sep = st.selectbox("Choose CSV separator", [",", ";", "\t"], index=0)
-                df = pd.read_csv(uploaded_file, sep=sep, header=0 if use_header else None)
-            else:
-                sheet_name = st.text_input("Excel sheet name (leave blank to use the first sheet)", "")
-                df = pd.read_excel(uploaded_file, sheet_name=sheet_name if sheet_name else 0)
+delimiter = st.selectbox("Separatore (solo per CSV)", ["Auto", ",", ";", "\t"], index=0)
 
-            if df.shape[1] < 2:
-                st.error("The file must contain at least 2 columns.")
-            else:
-                st.session_state.df = df
-                st.success("Dataset uploaded successfully!")
-                st.write("Data preview:")
-                st.dataframe(df.head())
+if file is not None:
+    try:
+        sep = None if delimiter == "Auto" else ("," if delimiter == "," else ("\t" if delimiter == "\t" else ";"))
+        df = read_any(file, delimiter=sep)
+        # Pulizia semplice: rimozione colonne totalmente vuote
+        df = df.dropna(axis=1, how="all")
+        st.session_state.df = df
+        st.session_state.diagnostics = dataset_diagnostics(df)
+        st.success("✅ Dataset caricato con successo.")
+        with st.expander("Anteprima (prime 10 righe)", expanded=True):
+            st.dataframe(df.head(10), use_container_width=True)
+        st.info(f"Righe: {df.shape[0]} • Colonne: {df.shape[1]}")
+    except Exception as e:
+        st.error(f"Errore in lettura: {e}")
 
-                st.info(f"Rows: {df.shape[0]} | Columns: {df.shape[1]}")
+if st.session_state.df is not None:
+    st.subheader("🔎 Validazione rapida")
+    diag = st.session_state.diagnostics or dataset_diagnostics(st.session_state.df)
+    st.session_state.diagnostics = diag
+    quality_alert(diag)
+    with st.expander("Dettaglio missing per colonna"):
+        show_missing_table(diag)
 
-                num_vars = df.select_dtypes(include=np.number).shape[1]
-                cat_vars = df.select_dtypes(include=["object", "category", "bool"]).shape[1]
-                st.info(f"Numeric variables: {num_vars} | Categorical variables: {cat_vars}")
+    # Azioni rapide
+    st.markdown("### Azioni rapide")
+    colA, colB = st.columns(2)
+    with colA:
+        if diag.get("n_duplicates", 0) > 0 and st.button("Rimuovi righe duplicate"):
+            st.session_state.df = st.session_state.df.drop_duplicates().reset_index(drop=True)
+            st.session_state.diagnostics = dataset_diagnostics(st.session_state.df)
+            st.success("Righe duplicate rimosse.")
+            st.experimental_rerun()
+    with colB:
+        constant_cols = diag.get("constant_cols", [])
+        if constant_cols and st.button("Elimina colonne costanti"):
+            st.session_state.df = st.session_state.df.drop(columns=constant_cols, errors="ignore")
+            st.session_state.diagnostics = dataset_diagnostics(st.session_state.df)
+            st.success("Colonne costanti eliminate.")
+            st.experimental_rerun()
 
-                st.info("Proceed to **'Sample Overview'** to explore your dataset structure.")
-        except Exception as e:
-            st.error(f"An error occurred while reading the file: {e}")
+    st.divider()
+    st.markdown("### Prossimi passi")
+    st.page_link("pages/2_📈_Descriptive_Statistics.py", label="Vai a: Descrizione del campione", icon="📈")
+    st.page_link("pages/4_📊_Explore_Distributions.py", label="Vai a: Esplora distribuzioni", icon="📊")
+    st.page_link("pages/5_🧪_Statistical_Tests.py", label="Vai a: Test statistici", icon="🧪")
