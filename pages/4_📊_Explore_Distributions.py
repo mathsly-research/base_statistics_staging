@@ -6,9 +6,9 @@ from core.state import init_state
 from core.validate import dataset_diagnostics
 from core.ui import quality_alert
 
-# -----------------------------
+# ---------------------------------
 # Inizializzazione & check dataset
-# -----------------------------
+# ---------------------------------
 init_state()
 
 st.title("📊 Step 3 — Esplora le distribuzioni")
@@ -21,7 +21,7 @@ if st.session_state.df is None:
 
 # Ora possiamo importare i grafici
 from core.plots import observed_vs_theoretical_normal, qq_plot, box_violin
-import plotly.graph_objects as go  # per clonare le figure
+import plotly.graph_objects as go  # per eventuali aggiustamenti layout
 
 df: pd.DataFrame = st.session_state.df
 
@@ -34,25 +34,21 @@ with st.expander("🔎 Controllo rapido qualità", expanded=False):
     quality_alert(diag)
 
 # ---------------------------------
-# Sezione didattica: come leggere i grafici
+# Spiegazione semplice
 # ---------------------------------
-with st.expander("ℹ️ Come leggere i grafici (spiegazione semplice)", expanded=True):
+with st.expander("ℹ️ Come leggere i grafici", expanded=True):
     st.markdown("""
 **Istogramma + KDE + Normale teorica**  
 Confronta la distribuzione **osservata** (barre azzurre, curva blu) con una **normale teorica** (curva rossa tratteggiata).  
-- Curva blu ≈ curva rossa → distribuzione vicina alla normale.  
-- Code lunghe / picchi asimmetrici → **asimmetria** o **outlier**.
 
 **Q-Q plot**  
-Confronta i **quantili** dei dati con quelli normali.  
-- Punti vicini alla retta → dati compatibili con la normale.  
-- Curvature a “S”/“C” → **non normalità** (code pesanti, asimmetria).
+Confronta i quantili dei dati con quelli della normale.  
 
-**Box/Violin**  
-Mostrano mediana, quartili e outlier (e, nel violin, la **densità**).  
-- Box sbilanciato o whisker lunghi → **asimmetria**/**outlier**.
+**Box e Violin**  
+Box: mediana, quartili e outlier.  
+Violin: aggiunge la forma della distribuzione.  
 """)
-    st.caption("Suggerimento: i grafici Plotly hanno l’icona **View fullscreen** (in alto a destra).")
+    st.caption("Suggerimento: per ingrandire usare l’icona **View fullscreen** in alto a destra del grafico.")
 
 # ---------------------------------
 # Selettori
@@ -68,28 +64,20 @@ with c_sel2:
 with c_sel3:
     bins = st.slider("Numero classi", min_value=8, max_value=30, value=12, step=1, disabled=not manual_bins)
 
-use_violin = st.toggle("Usa violin plot (invece del boxplot)", value=False)
-
 # ---------------------------------
-# Utility: clone della figura (evita DuplicateElementId)
+# Utility per layout grafici
 # ---------------------------------
-def clone_fig(fig):
-    # go.Figure(fig) clona dati+layout generando un nuovo oggetto con id diverso
-    return go.Figure(fig)
-
 def tighten_margins(fig, height=360):
     fig.update_layout(margin=dict(l=10, r=10, t=38, b=10), height=height)
     return fig
 
 # ---------------------------------
-# Tre grafici affiancati, colonne più ampie
+# RIGA 1 — Istogramma e Q-Q plot
 # ---------------------------------
 st.subheader(f"Distribuzione di **{target}**")
 
-# Colonne con rapporto ampio: 2 : 1.6 : 1.6
-col1, col2, col3 = st.columns([2.0, 1.6, 1.6], gap="large")
+col1, col2 = st.columns([1.9, 1.6], gap="large")
 
-# 1) Istogramma + KDE + Normale teorica (densità)
 with col1:
     st.markdown("**Istogramma + KDE + Normale**")
     fig_hist = observed_vs_theoretical_normal(
@@ -98,39 +86,44 @@ with col1:
         title=f"Observed vs Theoretical Distribution for '{target}'",
         x_label=target
     )
-    tighten_margins(fig_hist, height=360)
-    st.plotly_chart(fig_hist, use_container_width=True, key="histogram_main")
-    with st.expander("🔍 Ingrandisci", expanded=False):
-        st.plotly_chart(tighten_margins(clone_fig(fig_hist), height=560), use_container_width=True, key="histogram_zoom")
+    tighten_margins(fig_hist, height=380)
+    st.plotly_chart(fig_hist, use_container_width=True, key="histogram")
 
-# 2) Q-Q plot (robusto)
 with col2:
     st.markdown("**Q-Q plot**")
     try:
         fig_qq = qq_plot(df[target], title=f"Q-Q plot — {target}")
-        tighten_margins(fig_qq, height=360)
-        st.plotly_chart(fig_qq, use_container_width=True, key="qq_main")
-        with st.expander("🔍 Ingrandisci", expanded=False):
-            st.plotly_chart(tighten_margins(clone_fig(fig_qq), height=560), use_container_width=True, key="qq_zoom")
+        tighten_margins(fig_qq, height=380)
+        st.plotly_chart(fig_qq, use_container_width=True, key="qq")
     except Exception:
         st.info("Q-Q plot non disponibile (dati insufficienti o SciPy assente).")
 
-# 3) Box / Violin
-with col3:
-    st.markdown("**Box / Violin**")
-    fig_box = box_violin(df[target], by=None, show_violin=use_violin, title=("Violin" if use_violin else "Box"))
+# ---------------------------------
+# RIGA 2 — Box e Violin affiancati
+# ---------------------------------
+st.subheader("Box e Violin")
+
+colb1, colb2 = st.columns([1, 1], gap="large")
+
+with colb1:
+    st.markdown("**Box plot**")
+    fig_box = box_violin(df[target], by=None, show_violin=False, title="Box")
     tighten_margins(fig_box, height=360)
-    st.plotly_chart(fig_box, use_container_width=True, key="box_main")
-    with st.expander("🔍 Ingrandisci", expanded=False):
-        st.plotly_chart(tighten_margins(clone_fig(fig_box), height=560), use_container_width=True, key="box_zoom")
+    st.plotly_chart(fig_box, use_container_width=True, key="box")
+
+with colb2:
+    st.markdown("**Violin plot**")
+    fig_violin = box_violin(df[target], by=None, show_violin=True, title="Violin")
+    tighten_margins(fig_violin, height=360)
+    st.plotly_chart(fig_violin, use_container_width=True, key="violin")
 
 # ---------------------------------
-# Test di normalità (semplice, riassunto operativo)
+# Test di normalità (semplice)
 # ---------------------------------
 st.subheader("Verifica di normalità (semplice)")
 
 try:
-    from scipy import stats as spstats  # opzionale
+    from scipy import stats as spstats
 except Exception:
     spstats = None
 
@@ -190,25 +183,3 @@ else:
                  "\n".join(f"- {v}" for v in verdicts))
     else:
         st.success("Conclusione: nessun test indica deviazioni significative dalla normalità (al 5%).")
-
-# ---------------------------------
-# Aggiunta al Results Summary
-# ---------------------------------
-st.divider()
-if st.button("➕ Aggiungi grafici e risultati al Results Summary"):
-    st.session_state.report_items.append({
-        "type": "figure", "title": f"Observed vs Theoretical — {target}",
-        "figure": clone_fig(fig_hist).to_dict()
-    })
-    try:
-        st.session_state.report_items.append({
-            "type": "figure", "title": f"Q-Q plot — {target}",
-            "figure": clone_fig(fig_qq).to_dict()
-        })
-    except NameError:
-        pass
-    st.session_state.report_items.append({
-        "type": "figure", "title": ("Violin" if use_violin else "Box") + f" — {target}",
-        "figure": clone_fig(fig_box).to_dict()
-    })
-    st.success("Elementi aggiunti al Results Summary.")
