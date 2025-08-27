@@ -1,0 +1,10 @@
+streamlit
+pandas
+numpy
+scipy
+plotly
+openpyxl
+python-docx
+Pillow
+statsmodels
+scikit-posthocs
