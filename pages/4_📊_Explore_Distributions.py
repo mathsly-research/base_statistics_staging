@@ -2,12 +2,12 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+
 from core.state import init_state
 from core.validate import dataset_diagnostics
 from core.ui import quality_alert
 from core.plots import hist_kde, box_violin, qq_plot
 
-# opzionale: test di normalità
 try:
     from scipy import stats as spstats
 except Exception:
@@ -31,59 +31,83 @@ with st.expander("🔎 Controllo rapido qualità", expanded=False):
     st.session_state.diagnostics = diag
     quality_alert(diag)
 
-# --------------------------
+# -------------------------------------------------
 # Selettori
-# --------------------------
+# -------------------------------------------------
 num_cols = list(df.select_dtypes(include="number").columns)
 cat_cols = list(df.select_dtypes(include=["object","category","bool"]).columns)
 
 st.subheader("Selezione variabili")
-c1, c2, c3 = st.columns([1.2, 1, 1])
+c1, c2, c3, c4 = st.columns([1.2, 1.2, 1, 1])
 with c1:
     target = st.selectbox("Variabile continua", options=num_cols, help="Scegli una variabile numerica da esplorare.")
 with c2:
     by_group = st.selectbox("Raggruppa per (opzionale)", options=["— nessuno —"] + cat_cols, index=0,
                             help="Mostra distribuzioni separate per categoria.")
 with c3:
-    bins = st.slider("Numero di classi (istogramma)", min_value=10, max_value=100, value=30, step=5)
+    bins_manual = st.checkbox("Imposta manualmente il numero di classi", value=False)
+with c4:
+    bins = st.slider("Classi (se impostate manualmente)", min_value=5, max_value=60, value=30, step=1, disabled=not bins_manual)
 
 group_series = None if by_group == "— nessuno —" else df[by_group]
 
-# --------------------------
+# Heuristica: niente KDE di default su variabili intere con pochi valori distinti
+x_vals = df[target].dropna().values
+unique_ratio = (pd.Series(x_vals).nunique() / max(len(x_vals), 1)) if len(x_vals) else 0
+default_kde = (group_series is None) and (unique_ratio > 0.2) and (len(x_vals) >= 20)
+
+st.subheader("Opzioni grafico")
+use_kde = st.toggle("Mostra curva KDE (solo senza raggruppamento)", value=default_kde,
+                    help="La KDE è una curva di densità sovrapposta all’istogramma.")
+
+# -------------------------------------------------
 # Grafici
-# --------------------------
+# -------------------------------------------------
 st.subheader("Grafici principali")
 
-# Istogramma + KDE
-fig_hist = hist_kde(df[target], by=group_series, bins=bins, show_kde=(group_series is None),
-                    title=f"Istogramma — {target}" + (f" per {by_group}" if group_series is not None else ""))
+# Istogramma (+ KDE su densità se selezionata)
+fig_hist = hist_kde(
+    df[target],
+    by=group_series,
+    bins=(bins if bins_manual else None),
+    show_kde=use_kde if group_series is None else False,
+    title=f"Istogramma — {target}" + (f" per {by_group}" if group_series is not None else "")
+)
 st.plotly_chart(fig_hist, use_container_width=True)
 
 # Box o Violin
 colA, colB = st.columns([1, 1])
 with colA:
     use_violin = st.toggle("Usa violin plot (invece del boxplot)", value=False)
-fig_box = box_violin(df[target], by=group_series, show_violin=use_violin,
-                     title=("Violin" if use_violin else "Box") + (f" per {by_group}" if group_series is not None else ""))
+fig_box = box_violin(
+    df[target],
+    by=group_series,
+    show_violin=use_violin,
+    title=("Violin" if use_violin else "Box") + (f" per {by_group}" if group_series is not None else "")
+)
 st.plotly_chart(fig_box, use_container_width=True)
 
-# Q-Q plot (normalità)
-fig_qq = qq_plot(df[target], title=f"Q-Q plot — {target}")
-st.plotly_chart(fig_qq, use_container_width=True)
+# Q-Q plot (normalità) — protetto da errori
+st.subheader("Q-Q plot (normalità)")
+try:
+    fig_qq = qq_plot(df[target], title=f"Q-Q plot — {target}")
+    st.plotly_chart(fig_qq, use_container_width=True)
+except Exception as e:
+    st.info("Q-Q plot non disponibile per questa variabile (dati insufficienti o SciPy assente).")
 
-# --------------------------
+# -------------------------------------------------
 # Test di normalità (spiegati)
-# --------------------------
+# -------------------------------------------------
 st.subheader("Verifica di normalità (semplice)")
 
 with st.expander("Cosa significa normalità? (spiegazione breve)", expanded=False):
     st.markdown("""
-La **normalità** indica quanto i dati seguono una **distribuzione normale** (a campana).  
+La **normalità** indica quanto i dati seguono una **distribuzione normale** (a campana).
 Per molte analisi (es. *t-test* classici) è una **assunzione**: se violata, si preferiscono test **non parametrici**.
 
-- **Shapiro–Wilk** (consigliato, dati piccoli/medi): p-value < 0.05 ⇒ **non** normale.
-- **D’Agostino–Pearson (K²)** (alternative su campioni medi/grandi): p-value < 0.05 ⇒ **non** normale.
-- **Anderson–Darling**: fornisce un valore critico; se statistica > critico ⇒ **non** normale.
+- **Shapiro–Wilk** (consigliato, campioni piccoli/medi): p-value < 0.05 ⇒ **non** normale.
+- **D’Agostino–Pearson (K²)** (alternativa su campioni medi/grandi): p-value < 0.05 ⇒ **non** normale.
+- **Anderson–Darling**: se la statistica supera il valore critico ⇒ **non** normale.
 """)
 
 def normality_tests(x: pd.Series) -> dict:
@@ -93,45 +117,41 @@ def normality_tests(x: pd.Series) -> dict:
         return {"Nota": "Campione troppo piccolo per i test"}
     if spstats is None:
         return {"Nota": "SciPy non disponibile: test non eseguibili"}
-    # Shapiro (bene fino a ~5000 osservazioni)
     try:
         W, p = spstats.shapiro(x if x.size <= 5000 else x[:5000])
         out["Shapiro-Wilk"] = {"stat": float(W), "pvalue": float(p)}
     except Exception:
         pass
-    # D’Agostino-Pearson
     try:
         K2, p = spstats.normaltest(x)
         out["D’Agostino–Pearson K²"] = {"stat": float(K2), "pvalue": float(p)}
     except Exception:
         pass
-    # Anderson–Darling
     try:
         ad = spstats.anderson(x, dist="norm")
-        out["Anderson–Darling"] = {
-            "stat": float(ad.statistic),
-            "crit_at_5%": float(ad.critical_values[list(ad.significance_level).index(5.0)]) if 5.0 in ad.significance_level else None
-        }
+        crit_5 = None
+        if hasattr(ad, "significance_level") and 5.0 in ad.significance_level:
+            idx = list(ad.significance_level).index(5.0)
+            crit_5 = float(ad.critical_values[idx])
+        out["Anderson–Darling"] = {"stat": float(ad.statistic), "crit_at_5%": crit_5}
     except Exception:
         pass
     return out
 
 tests = normality_tests(df[target])
 
-# Presentazione risultati + interpretazione
 if "Nota" in tests:
     st.info(tests["Nota"])
 else:
-    import pandas as pd
     rows = []
     for name, res in tests.items():
         if "pvalue" in res:
             rows.append({"Test": name, "Statistica": round(res["stat"], 4), "p-value": round(res["pvalue"], 4)})
         else:
-            rows.append({"Test": name, "Statistica": round(res["stat"], 4), "Soglia 5%": (None if res["crit_at_5%"] is None else round(res["crit_at_5%"],4))})
+            rows.append({"Test": name, "Statistica": round(res["stat"], 4),
+                         "Soglia 5%": (None if res["crit_at_5%"] is None else round(res["crit_at_5%"], 4))})
     st.table(pd.DataFrame(rows))
 
-    # Interpretazione semplice
     verdicts = []
     if "Shapiro-Wilk" in tests and tests["Shapiro-Wilk"]["pvalue"] < 0.05:
         verdicts.append("Shapiro–Wilk: **non** normale (p<0.05).")
@@ -143,24 +163,26 @@ else:
             verdicts.append("Anderson–Darling: **non** normale (stat > soglia 5%).")
 
     if verdicts:
-        st.error("Conclusione: la variabile **non segue** la normale secondo almeno un test.\n\n" + "\n".join(f"- {v}" for v in verdicts))
+        st.error("Conclusione: la variabile **non segue** la normale secondo almeno un test.\n\n" +
+                 "\n".join(f"- {v}" for v in verdicts))
         st.markdown("""
 **Cosa fare?**  
 - Usare test **non parametrici** (es. Mann–Whitney, Wilcoxon, Kruskal–Wallis).  
-- Valutare trasformazioni (Log10, Box-Cox) **solo** per migliorare la lettura/robustezza.
+- Valutare trasformazioni (Log10, Box-Cox) **solo** per migliorare la robustezza.
 """)
     else:
-        st.success("Conclusione: nessun test indica deviazioni significative dalla normalità (al livello del 5%).")
+        st.success("Conclusione: nessun test indica deviazioni significative dalla normalità (al 5%).")
 
-# --------------------------
+# -------------------------------------------------
 # Aggiungi al Results Summary
-# --------------------------
+# -------------------------------------------------
 st.divider()
 if st.button("➕ Aggiungi grafici e risultati al Results Summary"):
-    # Nota: per l’esportazione a immagine potremo usare 'kaleido'; per ora salviamo gli oggetti Plotly
     st.session_state.report_items.append({"type": "figure", "title": f"Istogramma — {target}", "figure": fig_hist.to_dict()})
     st.session_state.report_items.append({"type": "figure", "title": ("Violin" if use_violin else "Box") + f" — {target}", "figure": fig_box.to_dict()})
-    st.session_state.report_items.append({"type": "figure", "title": f"Q-Q plot — {target}", "figure": fig_qq.to_dict()})
-    # Salviamo anche una sintesi normalità
-    st.session_state.report_items.append({"type": "text", "title": f"Normalità — {target}", "content": str(tests)})
+    # Il Q-Q plot potrebbe non essere stato creato se SciPy assente o dati insufficienti
+    try:
+        st.session_state.report_items.append({"type": "figure", "title": f"Q-Q plot — {target}", "figure": fig_qq.to_dict()})
+    except NameError:
+        pass
     st.success("Elementi aggiunti al Results Summary.")
