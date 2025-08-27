@@ -78,10 +78,27 @@ if mode == "Due variabili":
 # -----------------------------
 else:
     st.subheader("Matrice di correlazione (Pearson)")
+
+    # scelta scala colori
+    cmap = st.selectbox(
+        "Scegli la scala colori della heatmap:",
+        ["Spectral", "Viridis", "Picnic", "RdBu_r", "Plasma"],
+        index=0
+    )
+
     corr = df[num_cols].corr(method="pearson")
 
-    fig = px.imshow(corr, text_auto=".2f", color_continuous_scale="RdBu_r", zmin=-1, zmax=1)
-    fig.update_layout(title="Heatmap correlazioni (Pearson)", template="plotly_white")
+    fig = px.imshow(
+        corr,
+        text_auto=".2f",
+        color_continuous_scale=cmap,
+        zmin=-1, zmax=1
+    )
+    fig.update_layout(
+        title="Heatmap correlazioni (Pearson)",
+        template="plotly_white",
+        coloraxis_colorbar=dict(title="r", tickvals=[-1, -0.5, 0, 0.5, 1])
+    )
     st.plotly_chart(fig, use_container_width=True)
 
     st.dataframe(corr.round(3), use_container_width=True)
