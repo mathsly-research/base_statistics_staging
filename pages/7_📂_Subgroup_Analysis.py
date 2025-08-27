@@ -59,6 +59,9 @@ for target in target_vars:
     groups = [df[df[group_var] == g][target].dropna() for g in df[group_var].unique()]
     if len(groups) > 1:
         st.write("**Test statistici tra sottogruppi**")
+        posthoc_results = {}
+
+        # ANOVA
         try:
             fval, p_anova = stats.f_oneway(*groups)
             st.write(f"ANOVA: F = {fval:.3f}, p = {p_anova:.3g}")
@@ -67,9 +70,11 @@ for target in target_vars:
                 tukey = pairwise_tukeyhsd(endog=df[target], groups=df[group_var], alpha=0.05)
                 tukey_df = pd.DataFrame(data=tukey.summary().data[1:], columns=tukey.summary().data[0])
                 st.dataframe(tukey_df, use_container_width=True)
+                posthoc_results["Tukey HSD"] = tukey_df
         except Exception as e:
             st.info(f"ANOVA non calcolabile: {e}")
 
+        # Kruskal–Wallis
         try:
             hval, p_kw = stats.kruskal(*groups)
             st.write(f"Kruskal–Wallis: H = {hval:.3f}, p = {p_kw:.3g}")
@@ -77,17 +82,21 @@ for target in target_vars:
                 st.success("Kruskal–Wallis significativo → eseguo Dunn test")
                 dunn = sp.posthoc_dunn(df, val_col=target, group_col=group_var, p_adjust='bonferroni')
                 st.dataframe(dunn.round(4), use_container_width=True)
+                posthoc_results["Dunn"] = dunn
         except Exception as e:
             st.info(f"Kruskal–Wallis non calcolabile: {e}")
 
-    # Aggiunta opzionale al Results Summary
-    if st.button(f"➕ Aggiungi {target} a Results Summary", key=f"add_{target}"):
-        st.session_state.report_items.append({
-            "type": "subgroup",
-            "title": f"Analisi sottogruppi — {target} per {group_var}",
-            "content": desc.to_dict()
-        })
-        st.success(f"Analisi {target} aggiunta al Results Summary.")
+        # Salvataggio nel Results Summary
+        if st.button(f"➕ Aggiungi {target} a Results Summary", key=f"add_{target}"):
+            item = {
+                "type": "subgroup",
+                "title": f"Analisi sottogruppi — {target} per {group_var}",
+                "content": desc.to_dict()
+            }
+            if posthoc_results:
+                item["posthoc"] = {k: v.to_dict() for k, v in posthoc_results.items()}
+            st.session_state.report_items.append(item)
+            st.success(f"Analisi {target} aggiunta al Results Summary.")
 
 # -----------------------------
 # Guida interpretativa
@@ -95,12 +104,14 @@ for target in target_vars:
 with st.expander("ℹ️ Guida"):
     st.markdown("""
 **Analisi per sottogruppi**  
-- Permette di confrontare una variabile numerica tra i livelli di una variabile categorica.  
-- Fornisce descrittive, grafici e test statistici globali.  
-- Se i test globali sono significativi, vengono eseguiti **post-hoc**:  
-  - **Tukey HSD** (dopo ANOVA) → confronti a coppie tra tutti i gruppi.  
-  - **Dunn test** (dopo Kruskal–Wallis) → confronti multipli con correzione di Bonferroni.  
+- Confronta una variabile numerica tra i livelli di una variabile categorica.  
+- Fornisce:  
+  - Statistiche descrittive per sottogruppo  
+  - Boxplot comparativi  
+  - Test globali (ANOVA, Kruskal–Wallis)  
+  - **Post-hoc automatici**:
+    - **Tukey HSD** (se ANOVA significativa)  
+    - **Dunn test** con correzione Bonferroni (se Kruskal–Wallis significativo)  
 
-⚠️ Importante: i post-hoc vanno interpretati nel contesto (numerosità dei gruppi, varianze, distribuzioni).
+⚠️ Nota: i test post-hoc evidenziano quali coppie di gruppi differiscono, ma vanno interpretati nel contesto (dimensioni campionarie, distribuzioni, variabilità).
 """)
-
