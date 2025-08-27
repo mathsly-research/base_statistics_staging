@@ -4,7 +4,7 @@ import pandas as pd
 import plotly.express as px
 from scipy import stats
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
-import scikit_posthocs as sp post
+import scikit_posthocs as sp
 
 from core.state import init_state
 
