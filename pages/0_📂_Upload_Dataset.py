@@ -8,7 +8,7 @@ from core.ui import quality_alert, show_missing_table
 
 init_state()
 
-st.title("📂 Step 1 — Upload Dataset")
+st.title("📂 Step Iniziale — Upload Dataset")
 
 st.markdown("""
 Carichi un file **CSV**, **Excel (.xlsx/.xls)** o **Parquet**.
