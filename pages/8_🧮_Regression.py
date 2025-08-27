@@ -13,10 +13,14 @@ from statsmodels.tools.tools import add_constant
 
 # Optional: sklearn for ROC/AUC, confusion matrix, regularized logistic
 try:
-    from sklearn.metrics import roc_curve, auc, confusion_matrix, precision_recall_fscore_support
+    from sklearn.metrics import (
+        roc_curve, auc, confusion_matrix,
+        precision_score, recall_score, f1_score, accuracy_score
+    )
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
     from sklearn.pipeline import make_pipeline
+    from sklearn.utils import resample
     _HAS_SKLEARN = True
 except Exception:
     _HAS_SKLEARN = False
@@ -90,6 +94,43 @@ def _qq_plot(residuals: np.ndarray):
     fig.add_trace(go.Scatter(x=[minv, maxv], y=[minv, maxv], mode="lines", name="45°", line=dict(dash="dash")))
     fig.update_layout(title="Q-Q plot dei residui", xaxis_title="Quantili teorici", yaxis_title="Quantili residui")
     return fig
+
+# -----------------------------
+# Bootstrap per CI metriche (stratificato)
+# -----------------------------
+def _bootstrap_ci_metric(y_true: np.ndarray, y_pred: np.ndarray, func, n_boot: int = 500, alpha: float = 0.05, seed: int = 42):
+    """
+    CI bootstrap stratificato per una metrica di classificazione.
+    y_true, y_pred: array binari (0/1)
+    func: callable(y_true, y_pred) -> float
+    """
+    rng = np.random.default_rng(seed)
+    n = len(y_true)
+    boot = []
+    for _ in range(n_boot):
+        idx = resample(np.arange(n), replace=True, stratify=y_true, random_state=int(rng.integers(1e9)))
+        boot.append(func(y_true[idx], y_pred[idx]))
+    lo, hi = np.percentile(boot, [100*alpha/2.0, 100*(1-alpha/2.0)])
+    return float(lo), float(hi)
+
+def _metrics_with_ci(y_true: np.ndarray, y_pred: np.ndarray, n_boot: int = 500, alpha: float = 0.05):
+    """Restituisce DataFrame con Value e CI 95% per Precision, Recall, F1, Accuracy (bootstrap stratificato)."""
+    prec = precision_score(y_true, y_pred, zero_division=0)
+    rec  = recall_score(y_true, y_pred, zero_division=0)
+    f1   = f1_score(y_true, y_pred, zero_division=0)
+    acc  = accuracy_score(y_true, y_pred)
+    p_lo, p_hi = _bootstrap_ci_metric(y_true, y_pred, lambda yt, yp: precision_score(yt, yp, zero_division=0), n_boot=n_boot, alpha=alpha)
+    r_lo, r_hi = _bootstrap_ci_metric(y_true, y_pred, lambda yt, yp: recall_score(yt, yp, zero_division=0), n_boot=n_boot, alpha=alpha)
+    f_lo, f_hi = _bootstrap_ci_metric(y_true, y_pred, lambda yt, yp: f1_score(yt, yp, zero_division=0), n_boot=n_boot, alpha=alpha)
+    a_lo, a_hi = _bootstrap_ci_metric(y_true, y_pred, lambda yt, yp: accuracy_score(yt, yp), n_boot=n_boot, alpha=alpha)
+
+    df = pd.DataFrame([
+        {"Metric": "Precision", "Value": prec, "CI 2.5%": p_lo, "CI 97.5%": p_hi},
+        {"Metric": "Recall (Sensibilità)", "Value": rec, "CI 2.5%": r_lo, "CI 97.5%": r_hi},
+        {"Metric": "F1", "Value": f1, "CI 2.5%": f_lo, "CI 97.5%": f_hi},
+        {"Metric": "Accuracy", "Value": acc, "CI 2.5%": a_lo, "CI 97.5%": a_hi},
+    ])
+    return df
 
 # -----------------------------
 # Init & checks
@@ -173,6 +214,7 @@ if model_type == "Lineare (OLS)":
         "BIC": float(model.bic)
     }
     st.write(pd.DataFrame(info, index=["Valore"]).T)
+    st.caption("**Come leggere — Metriche globali (OLS):** **N**=numero osservazioni; **R²**=quota di varianza spiegata; **R² adj.** penalizza la complessità; **AIC/BIC** per confronto modelli (più basso è meglio).")
 
     # Coefficienti con CI e p-value (robusti)
     params = model.params
@@ -187,6 +229,7 @@ if model_type == "Lineare (OLS)":
     })
     st.markdown("**Coefficienti (IC95% e p-value)**")
     st.dataframe(df_coefs.round(4), use_container_width=True)
+    st.caption("**Come leggere — Tabella coefficienti (OLS):** ogni **coef** è la variazione media dell’outcome per +1 del predittore (a parità degli altri). Se l’**IC95%** non include 0, l’effetto è significativo (coerente col p-value).")
 
     # Diagnostica affiancata
     st.subheader("Diagnostica modello")
@@ -199,15 +242,13 @@ if model_type == "Lineare (OLS)":
         fig1 = px.scatter(x=fitted, y=resid, labels={"x": "Fitted", "y": "Residui"}, title="Residui vs Fitted")
         fig1.add_hline(y=0, line_dash="dash")
         st.plotly_chart(fig1, use_container_width=True)
-        st.caption("**Come leggere — Residui vs Fitted:** i punti dovrebbero distribuirsi casualmente attorno a 0 senza pattern. "
-                   "Strutture a ventaglio o curve indicano possibili violazioni (non linearità/eteroscedasticità).")
+        st.caption("**Come leggere — Residui vs Fitted:** punti casuali attorno a 0 senza pattern → assunzioni plausibili; ventaglio/curve → possibili violazioni (non linearità/eteroscedasticità).")
 
     with col2:
         figqq = _qq_plot(resid)
         if figqq is not None:
             st.plotly_chart(figqq, use_container_width=True)
-            st.caption("**Come leggere — Q-Q plot dei residui:** i punti dovrebbero allinearsi alla diagonale. "
-                       "Deviazioni sistematiche indicano non normalità dei residui.")
+            st.caption("**Come leggere — Q-Q residui:** punti sulla diagonale → normalità dei residui; deviazioni sistematiche → non normalità.")
 
     # Shapiro-Wilk residui (se SciPy)
     if _HAS_SCIPY and len(resid) >= 3:
@@ -230,8 +271,7 @@ if model_type == "Lineare (OLS)":
     st.markdown("**Multicollinearità (VIF)**")
     vif_df = _compute_vif(X)
     st.dataframe(vif_df.round(3), use_container_width=True)
-    st.caption("**Come leggere — VIF:** ≈1 nessuna collinearità; >5 moderata; >10 problematica. "
-               "Collinearità elevata rende instabili i coefficienti.")
+    st.caption("**Come leggere — VIF:** ≈1 nessuna collinearità; >5 moderata; >10 problematica. Collinearità alta rende instabili i coefficienti.")
 
     # ➕ Salva nel Results Summary
     if st.button("➕ Aggiungi risultati OLS al Results Summary"):
@@ -252,15 +292,13 @@ if model_type == "Lineare (OLS)":
         })
         st.success("Modello OLS aggiunto al Results Summary.")
 
-    # Guida interpretativa (riepilogo)
-    with st.expander("ℹ️ Come leggere i risultati (OLS)", expanded=False):
+    with st.expander("ℹ️ Approfondimento — Analisi dei residui"):
         st.markdown("""
-- **R² / R² adj.**: quota di varianza spiegata (R² adj. penalizza modelli troppo complessi).  
-- **Coefficienti**: effetto marginale; IC95% e p-value quantificano l’incertezza.  
-- **Residui vs Fitted**: pattern ≠ casuale → non linearità o eteroscedasticità.  
-- **Q-Q residui**: deviazioni dalla diagonale → non normalità.  
-- **Breusch–Pagan**: p<0.05 → eteroscedasticità (qui SE robusti HC3 già applicati).  
-- **VIF**: collinearità alta inflaziona varianze dei coefficienti.
+I **residui** sono differenze tra osservato e predetto. Se il modello è adeguato:
+- pattern **non strutturati** → **linearità** plausibile;
+- **varianza** circa costante → **omoscedasticità**;
+- **distribuzione** circa normale → inferenza classica più affidabile.
+Violazioni suggeriscono trasformazioni, termini non lineari (es. polinomiali/spline) o modelli alternativi.
 """)
 
 # ===========================================================
@@ -312,6 +350,7 @@ elif model_type == "Logistica (binaria)":
     })
     st.markdown("**Odds Ratio (IC95%) e p-value**")
     st.dataframe(df_or.round(4), use_container_width=True)
+    st.caption(f"**Come leggere — Tabella coefficienti (Logistica):** l’**OR** è l’effetto moltiplicativo sul rapporto di odds della classe positiva (**{positive_class}**). OR>1 ↑ probabilità relativa, OR<1 ↓. Se l’IC95% non include 1, l’effetto è significativo.")
 
     # Pseudo-R² (McFadden)
     llf = float(getattr(logit, "llf", np.nan))
@@ -327,6 +366,7 @@ elif model_type == "Logistica (binaria)":
         "BIC": float(getattr(logit, "bic", np.nan)),
     }
     st.write(pd.DataFrame(info, index=["Valore"]).T)
+    st.caption("**Come leggere — Metriche globali (Logit):** **N**=osservazioni; **LogLik**=verosimiglianza; **Pseudo-R²** misura adattamento (0=nullo; ~0.2–0.4 spesso accettabile); **AIC/BIC** per confronto modelli.")
 
     # Valutazione predittiva — grafici affiancati
     st.subheader("Valutazione predittiva")
@@ -351,8 +391,7 @@ elif model_type == "Logistica (binaria)":
             figroc.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="lines", name="No skill", line=dict(dash="dash")))
             figroc.update_layout(title="ROC curve", xaxis_title="FPR", yaxis_title="TPR")
             st.plotly_chart(figroc, use_container_width=True)
-            st.caption("**Come leggere — ROC curve:** più la curva si allontana dalla diagonale, migliore la discriminazione. "
-                       "L’AUC riassume l’accuratezza indipendente dalla soglia (0.5 casuale; >0.7 accettabile; >0.8 buona; >0.9 eccellente).")
+            st.caption("**Come leggere — ROC curve:** **TPR** (=Recall=TP/(TP+FN)) vs **FPR** (=FP/(FP+TN)). Più la curva si allontana dalla diagonale, migliore la discriminazione. **AUC**: 0.5 casuale; >0.7 accettabile; >0.8 buona; >0.9 eccellente.")
 
         with col2:
             cm = confusion_matrix(y, y_pred, labels=[1,0])
@@ -361,13 +400,14 @@ elif model_type == "Logistica (binaria)":
                 text=cm, texttemplate="%{text}", colorscale="Blues"))
             figcm.update_layout(title="Confusion matrix", xaxis_title="", yaxis_title="")
             st.plotly_chart(figcm, use_container_width=True)
-            st.caption("**Come leggere — Confusion matrix:** TP (pred 1 | true 1), TN (pred 0 | true 0). "
-                       "FP e FN quantificano errori; osservare Precision, Recall e F1 per bilanciare la soglia.")
+            st.caption("**Acronimi:** **TP**=Vero Positivo, **TN**=Vero Negativo, **FP**=Falso Positivo, **FN**=Falso Negativo. Regolando la **soglia** bilancia il trade-off tra FP e FN.")
 
-        prec, rec, f1, _ = precision_recall_fscore_support(y, y_pred, average="binary", zero_division=0)
-        st.write(pd.DataFrame({"Precision": [prec], "Recall": [rec], "F1": [f1], "Accuracy":[(y==y_pred).mean()]}).round(3))
+        # Metriche con CI bootstrap stratificati
+        metrics_df = _metrics_with_ci(y.values if isinstance(y, pd.Series) else y, y_pred, n_boot=500, alpha=0.05).round(3)
+        st.dataframe(metrics_df, use_container_width=True)
+        st.caption("**Metriche di classificazione:** **Precision**=TP/(TP+FP); **Recall/Sensibilità (TPR)**=TP/(TP+FN); **Accuracy**=(TP+TN)/Totale; **F1**=media armonica di Precision e Recall. **CI 95%** con **bootstrap stratificato (n=500)**.")
     else:
-        st.info("Per ROC/AUC e confusion matrix installare `scikit-learn`.")
+        st.info("Per ROC/AUC, confusion matrix e metriche avanzate installare `scikit-learn`.")
         st.write(pd.DataFrame({"Accuracy":[(y==y_pred).mean()]}).round(3))
 
     # ➕ Salva nel Results Summary
@@ -388,16 +428,6 @@ elif model_type == "Logistica (binaria)":
             }
         })
         st.success("Modello logit aggiunto al Results Summary.")
-
-    # Guida interpretativa
-    with st.expander("ℹ️ Come leggere i risultati (Logistica)", expanded=False):
-        st.markdown(f"""
-- **Odds Ratio (OR)**: effetto moltiplicativo sul **rapporto di odds** della classe positiva (**{positive_class}**).  
-  OR>1 ↑ probabilità relativa, OR<1 ↓. IC95% che **non** include 1 → effetto significativo.  
-- **Pseudo-R² (McFadden)**: bontà di adattamento (0 = nullo; ~0.2–0.4 spesso “buono”).  
-- **ROC/AUC**: accuratezza indipendente dalla soglia; più la curva è lontana dalla diagonale, meglio è.  
-- **Confusion matrix / Precision / Recall / F1**: dipendono dalla **soglia** scelta.
-""")
 
 # ===========================================================
 #          LOGISTICA REGOLARIZZATA (L1/L2)
@@ -439,8 +469,7 @@ elif model_type == "Logistica regolarizzata (L1/L2)":
     ORs = np.exp(coefs)
     coef_df = pd.DataFrame({"term": X.columns, "coef": coefs, "OR (exp coef)": ORs}).round(4)
     st.dataframe(coef_df, use_container_width=True)
-    st.caption("**Come leggere — Coefficienti penalizzati:** la penalizzazione riduce overfitting e collinearità; "
-               "i coefficienti piccoli possono essere spinti verso 0 (soprattutto con L1).")
+    st.caption("**Come leggere — Coefficienti penalizzati:** la penalizzazione riduce overfitting/collinearità. Con **L1** alcuni coefficienti possono diventare 0 (selezione di variabili).")
 
     # Prestazioni — grafici affiancati
     st.subheader("Valutazione predittiva")
@@ -460,7 +489,7 @@ elif model_type == "Logistica regolarizzata (L1/L2)":
             figroc.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="lines", name="No skill", line=dict(dash="dash")))
             figroc.update_layout(title="ROC curve", xaxis_title="FPR", yaxis_title="TPR")
             st.plotly_chart(figroc, use_container_width=True)
-            st.caption("**Come leggere — ROC curve:** l’AUC riassume la discriminazione del modello su tutte le soglie.")
+            st.caption("**Come leggere — ROC curve:** TPR (Recall) vs FPR; l’**AUC** riassume la discriminazione del modello su tutte le soglie.")
 
         with col2:
             cm = confusion_matrix(y, y_pred, labels=[1,0])
@@ -469,11 +498,12 @@ elif model_type == "Logistica regolarizzata (L1/L2)":
                 text=cm, texttemplate="%{text}", colorscale="Blues"))
             figcm.update_layout(title="Confusion matrix", xaxis_title="", yaxis_title="")
             st.plotly_chart(figcm, use_container_width=True)
-            st.caption("**Come leggere — Confusion matrix:** regoli la soglia per bilanciare FP e FN; "
-                       "osservi l’impatto su Precision, Recall e F1.")
+            st.caption("**Acronimi:** **TP**=Vero Positivo, **TN**=Vero Negativo, **FP**=Falso Positivo, **FN**=Falso Negativo. **TPR**=TP/(TP+FN); **FPR**=FP/(FP+TN).")
 
-        prec, rec, f1, _ = precision_recall_fscore_support(y, y_pred, average="binary", zero_division=0)
-        st.write(pd.DataFrame({"Precision": [prec], "Recall": [rec], "F1": [f1], "Accuracy":[(y==y_pred).mean()]}).round(3))
+        # Metriche con CI bootstrap stratificati
+        metrics_df = _metrics_with_ci(y.values if isinstance(y, pd.Series) else y, y_pred, n_boot=500, alpha=0.05).round(3)
+        st.dataframe(metrics_df, use_container_width=True)
+        st.caption("**Metriche di classificazione:** **Precision**=TP/(TP+FP); **Recall/Sensibilità (TPR)**=TP/(TP+FN); **Accuracy**=(TP+TN)/Totale; **F1**=media armonica di Precision e Recall. **CI 95%** con bootstrap stratificato (n=500).")
     else:
         st.info("Per ROC/AUC e confusion matrix installare `scikit-learn`.")
         st.write(pd.DataFrame({"Accuracy":[(y==y_pred).mean()]}).round(3))
@@ -528,6 +558,7 @@ else:  # "Poisson (conteggi)"
     })
     st.markdown("**Incidence Rate Ratio (IRR, IC95%) e p-value**")
     st.dataframe(df_irr.round(4), use_container_width=True)
+    st.caption("**Come leggere — Tabella coefficienti (Poisson):** l’**IRR** è l’effetto moltiplicativo sul **tasso atteso di eventi**. IRR>1 → aumento; IRR<1 → diminuzione. Se l’IC95% non include 1, l’effetto è significativo.")
 
     # Info generali
     info = {
@@ -537,6 +568,7 @@ else:  # "Poisson (conteggi)"
         "AIC": float(model.aic)
     }
     st.write(pd.DataFrame(info, index=["Valore"]).T)
+    st.caption("**Come leggere — Metriche globali (Poisson):** **Deviance** e **Pearson Chi2** misurano l’adattamento; valori molto elevati suggeriscono **overdispersione** (considerare quasi-Poisson / Negative Binomial). **AIC** per confronto modelli.")
 
     # ➕ Salva nel Results Summary
     if st.button("➕ Aggiungi risultati Poisson al Results Summary"):
@@ -555,12 +587,8 @@ else:  # "Poisson (conteggi)"
         })
         st.success("Modello di Poisson aggiunto al Results Summary.")
 
-    # Guida interpretativa
-    with st.expander("ℹ️ Come leggere i risultati (Poisson)", expanded=False):
+    with st.expander("ℹ️ Approfondimento — Poisson e overdispersione"):
         st.markdown("""
-- **IRR (Incidence Rate Ratio)**: effetto moltiplicativo sul **tasso atteso** di eventi.  
-  - **IRR > 1** → aumento del numero atteso di eventi; **IRR < 1** → diminuzione.  
-  - Se l’**IC95%** non include 1, l’effetto è statisticamente significativo.  
-- **Deviance** / **Pearson Chi2**: misure di bontà di adattamento; valori molto elevati possono indicare **overdispersione** (valutare quasi-Poisson o Negative Binomial).  
-- **AIC**: confronto tra modelli (più basso = migliore compromesso qualità/complessità).
+La regressione di **Poisson** assume varianza ≈ media dei conteggi. Se la **varianza >> media** (overdispersione),
+i SE possono essere sottostimati: considerare **quasi-Poisson** o **Negative Binomial** e l’uso di **offset** per tassi (es. log del tempo a rischio).
 """)
