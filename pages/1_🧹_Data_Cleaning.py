@@ -11,12 +11,32 @@ from core.state import init_state
 init_state()
 st.title("🧹 Step 8 — Gestione dati mancanti e filtri")
 
+# Manteniamo sempre copia originale
+if st.session_state.df_original is None and st.session_state.df is not None:
+    st.session_state.df_original = st.session_state.df.copy()
+if st.session_state.df_working is None and st.session_state.df is not None:
+    st.session_state.df_working = st.session_state.df.copy()
+
 if st.session_state.df is None:
     st.warning("Nessun dataset in memoria. Carichi i dati in **Upload Dataset**.")
     st.page_link("pages/1_📂_Upload_Dataset.py", label="➡️ Vai a Upload Dataset", icon="📂")
     st.stop()
 
-df: pd.DataFrame = st.session_state.df.copy()
+# -----------------------------
+# Selettore dataset attivo
+# -----------------------------
+choice = st.radio(
+    "Seleziona dataset attivo:",
+    ["Originale", "Modificato (working)"],
+    horizontal=True
+)
+
+if choice == "Originale":
+    df = st.session_state.df_original.copy()
+else:
+    df = st.session_state.df_working.copy()
+
+st.info(f"Dataset attivo: **{choice}** — {df.shape[0]} righe × {df.shape[1]} colonne")
 
 # -----------------------------
 # Diagnostica missing values
@@ -36,8 +56,8 @@ st.dataframe(summary, use_container_width=True)
 st.subheader("⚙️ Strategie di gestione")
 options = {
     "Nessuna azione": None,
-    "Elimina righe con missing": "drop_rows",
-    "Elimina variabile (colonna)": "drop_col",
+    "Elimina righe con missing (sconsigliato)": "drop_rows",
+    "Elimina variabile (colonna) (sconsigliato)": "drop_col",
     "Sostituisci con media (solo numeriche)": "mean",
     "Sostituisci con mediana (solo numeriche)": "median",
     "Sostituisci con moda": "mode"
@@ -51,6 +71,8 @@ for col in df.columns:
         index=0,
         key=f"strategy_{col}"
     )
+    if "sconsigliato" in strategy[col]:
+        st.warning(f"⚠️ {col}: l'eliminazione può introdurre bias. Usare solo se strettamente necessario.")
 
 if st.button("➡️ Applica strategie di gestione"):
     for col, choice in strategy.items():
@@ -69,8 +91,9 @@ if st.button("➡️ Applica strategie di gestione"):
                 mode_val = df[col].mode().iloc[0]
                 df[col] = df[col].fillna(mode_val)
 
-    st.session_state.df = df
-    st.success("Strategie applicate e dataset aggiornato!")
+    st.session_state.df_working = df
+    st.success("Strategie applicate al dataset modificato (working).")
+    st.warning("⚠️ I risultati precedenti potrebbero non essere più coerenti: ricalcolarli se necessario.")
 
 # -----------------------------
 # Filtri interattivi
@@ -82,9 +105,9 @@ for col in df.columns:
     if pd.api.types.is_numeric_dtype(df[col]):
         min_val, max_val = float(df[col].min()), float(df[col].max())
         sel_min, sel_max = st.slider(
-            f"Filtro per {col}:", 
-            min_value=min_val, max_value=max_val, 
-            value=(min_val, max_val), step=(max_val-min_val)/100
+            f"Filtro per {col}:",
+            min_value=min_val, max_value=max_val,
+            value=(min_val, max_val)
         )
         filters[col] = (sel_min, sel_max)
     else:
@@ -98,8 +121,9 @@ if st.button("➡️ Applica filtri"):
             df = df[(df[col] >= rule[0]) & (df[col] <= rule[1])]
         else:
             df = df[df[col].isin(rule)]
-    st.session_state.df = df
-    st.success(f"Filtri applicati: {df.shape[0]} righe rimanenti.")
+    st.session_state.df_working = df
+    st.success(f"Filtri applicati al dataset modificato (working): {df.shape[0]} righe rimanenti.")
+    st.warning("⚠️ I risultati precedenti potrebbero non essere più coerenti: ricalcolarli se necessario.")
 
 # -----------------------------
 # Guida interpretativa
@@ -107,13 +131,12 @@ if st.button("➡️ Applica filtri"):
 with st.expander("ℹ️ Guida"):
     st.markdown("""
 **Gestione dei dati mancanti:**  
-- *Elimina righe*: sicuro se poche righe sono incomplete.  
-- *Elimina colonna*: utile se la variabile ha troppi missing.  
-- *Imputazione (media/mediana/moda)*: mantiene il dataset completo, ma attenzione a non introdurre bias.
+- *Elimina righe / colonne*: **sconsigliato** perché può introdurre bias o perdita di informazione.  
+- *Imputazione (media/mediana/moda)*: mantiene il dataset completo, ma attenzione a non introdurre distorsioni.  
 
-**Filtri:**  
-- Per variabili numeriche → si imposta un range.  
-- Per variabili categoriche → si scelgono i livelli inclusi.  
+**Dataset attivi:**  
+- **Originale**: resta invariato e serve come riferimento.  
+- **Modificato (working)**: contiene le modifiche applicate (imputazioni, filtri, ecc.).  
 
-⚠️ Dopo ogni modifica, il dataset aggiornato sostituisce quello in memoria e sarà usato nei passi successivi.
+⚠️ Se cambi dataset, i risultati già salvati potrebbero non essere più coerenti.
 """)
