@@ -119,10 +119,12 @@ def _metrics_with_ci(y_true: np.ndarray, y_pred: np.ndarray, n_boot: int = 500, 
     rec  = recall_score(y_true, y_pred, zero_division=0)
     f1   = f1_score(y_true, y_pred, zero_division=0)
     acc  = accuracy_score(y_true, y_pred)
-    p_lo, p_hi = _bootstrap_ci_metric(y_true, y_pred, lambda yt, yp: precision_score(yt, yp, zero_division=0), n_boot=n_boot, alpha=alpha)
-    r_lo, r_hi = _bootstrap_ci_metric(y_true, y_pred, lambda yt, yp: recall_score(yt, yp, zero_division=0), n_boot=n_boot, alpha=alpha)
-    f_lo, f_hi = _bootstrap_ci_metric(y_true, y_pred, lambda yt, yp: f1_score(yt, yp, zero_division=0), n_boot=n_boot, alpha=alpha)
-    a_lo, a_hi = _bootstrap_ci_metric(y_true, y_pred, lambda yt, yp: accuracy_score(yt, yp), n_boot=n_boot, alpha=alpha)
+    # Spinner dedicato al bootstrap (potrebbe richiedere tempo)
+    with st.spinner("Calcolo degli intervalli di confidenza (bootstrap stratificato)…"):
+        p_lo, p_hi = _bootstrap_ci_metric(y_true, y_pred, lambda yt, yp: precision_score(yt, yp, zero_division=0), n_boot=n_boot, alpha=alpha)
+        r_lo, r_hi = _bootstrap_ci_metric(y_true, y_pred, lambda yt, yp: recall_score(yt, yp, zero_division=0), n_boot=n_boot, alpha=alpha)
+        f_lo, f_hi = _bootstrap_ci_metric(y_true, y_pred, lambda yt, yp: f1_score(yt, yp, zero_division=0), n_boot=n_boot, alpha=alpha)
+        a_lo, a_hi = _bootstrap_ci_metric(y_true, y_pred, lambda yt, yp: accuracy_score(yt, yp), n_boot=n_boot, alpha=alpha)
 
     df = pd.DataFrame([
         {"Metric": "Precision", "Value": prec, "CI 2.5%": p_lo, "CI 97.5%": p_hi},
@@ -197,13 +199,15 @@ if not X_sel:
 #                     LINEARE (OLS)
 # ===========================================================
 if model_type == "Lineare (OLS)":
-    y, X = _make_design_matrix(df, target, X_sel, dropna=True)
+    with st.spinner("Preparo la matrice del modello…"):
+        y, X = _make_design_matrix(df, target, X_sel, dropna=True)
     if X.shape[0] < 5 or X.shape[1] < 2:
         st.error("Dati insufficienti per stimare il modello (pochi casi o nessun predittore dopo la codifica).")
         st.stop()
 
     # OLS con errori standard robusti (HC3)
-    model = sm.OLS(y, X).fit(cov_type="HC3")
+    with st.spinner("Stimo il modello OLS con errori standard robusti (HC3)…"):
+        model = sm.OLS(y, X).fit(cov_type="HC3")
 
     st.subheader("Risultati modello (OLS con SE robusti HC3)")
     info = {
@@ -217,16 +221,17 @@ if model_type == "Lineare (OLS)":
     st.caption("**Come leggere — Metriche globali (OLS):** **N**=numero osservazioni; **R²**=quota di varianza spiegata; **R² adj.** penalizza la complessità; **AIC/BIC** per confronto modelli (più basso è meglio).")
 
     # Coefficienti con CI e p-value (robusti)
-    params = model.params
-    conf = model.conf_int()
-    pvals = model.pvalues
-    df_coefs = pd.DataFrame({
-        "term": params.index,
-        "coef": params.values,
-        "CI 2.5%": conf[0].values,
-        "CI 97.5%": conf[1].values,
-        "p-value": pvals.values
-    })
+    with st.spinner("Calcolo coefficienti, intervalli di confidenza e p-value…"):
+        params = model.params
+        conf = model.conf_int()
+        pvals = model.pvalues
+        df_coefs = pd.DataFrame({
+            "term": params.index,
+            "coef": params.values,
+            "CI 2.5%": conf[0].values,
+            "CI 97.5%": conf[1].values,
+            "p-value": pvals.values
+        })
     st.markdown("**Coefficienti (IC95% e p-value)**")
     st.dataframe(df_coefs.round(4), use_container_width=True)
     st.caption("**Come leggere — Tabella coefficienti (OLS):** ogni **coef** è la variazione media dell’outcome per +1 del predittore (a parità degli altri). Se l’**IC95%** non include 0, l’effetto è significativo (coerente col p-value).")
@@ -239,13 +244,15 @@ if model_type == "Lineare (OLS)":
     col1, col2 = st.columns(2)
 
     with col1:
-        fig1 = px.scatter(x=fitted, y=resid, labels={"x": "Fitted", "y": "Residui"}, title="Residui vs Fitted")
-        fig1.add_hline(y=0, line_dash="dash")
-        st.plotly_chart(fig1, use_container_width=True)
+        with st.spinner("Genero grafico Residui vs Fitted…"):
+            fig1 = px.scatter(x=fitted, y=resid, labels={"x": "Fitted", "y": "Residui"}, title="Residui vs Fitted")
+            fig1.add_hline(y=0, line_dash="dash")
+            st.plotly_chart(fig1, use_container_width=True)
         st.caption("**Come leggere — Residui vs Fitted:** punti casuali attorno a 0 senza pattern → assunzioni plausibili; ventaglio/curve → possibili violazioni (non linearità/eteroscedasticità).")
 
     with col2:
-        figqq = _qq_plot(resid)
+        with st.spinner("Genero Q-Q plot dei residui…"):
+            figqq = _qq_plot(resid)
         if figqq is not None:
             st.plotly_chart(figqq, use_container_width=True)
             st.caption("**Come leggere — Q-Q residui:** punti sulla diagonale → normalità dei residui; deviazioni sistematiche → non normalità.")
@@ -253,7 +260,8 @@ if model_type == "Lineare (OLS)":
     # Shapiro-Wilk residui (se SciPy)
     if _HAS_SCIPY and len(resid) >= 3:
         try:
-            W, p_sh = spstats.shapiro(resid if len(resid) <= 5000 else resid[:5000])
+            with st.spinner("Eseguo test di normalità (Shapiro–Wilk) sui residui…"):
+                W, p_sh = spstats.shapiro(resid if len(resid) <= 5000 else resid[:5000])
             st.write(f"Shapiro–Wilk residui: W={W:.3f}, p={p_sh:.3g}  "
                      f"{'→ compatibile con normalità ✅' if p_sh>=0.05 else '→ devia da normalità ❌'}")
         except Exception:
@@ -261,7 +269,8 @@ if model_type == "Lineare (OLS)":
 
     # Breusch–Pagan per omoscedasticità
     try:
-        bp_stat, bp_p, _, _ = het_breuschpagan(resid, X)
+        with st.spinner("Eseguo test di omoscedasticità (Breusch–Pagan)…"):
+            bp_stat, bp_p, _, _ = het_breuschpagan(resid, X)
         st.write(f"Breusch–Pagan: stat={bp_stat:.3f}, p={bp_p:.3g}  "
                  f"{'→ omoscedasticità compatibile ✅' if bp_p>=0.05 else '→ eteroscedasticità sospetta ❌'}")
     except Exception:
@@ -269,27 +278,29 @@ if model_type == "Lineare (OLS)":
 
     # VIF per multicollinearità
     st.markdown("**Multicollinearità (VIF)**")
-    vif_df = _compute_vif(X)
+    with st.spinner("Calcolo VIF (potrebbe richiedere alcuni secondi con molte variabili)…"):
+        vif_df = _compute_vif(X)
     st.dataframe(vif_df.round(3), use_container_width=True)
     st.caption("**Come leggere — VIF:** ≈1 nessuna collinearità; >5 moderata; >10 problematica. Collinearità alta rende instabili i coefficienti.")
 
     # ➕ Salva nel Results Summary
     if st.button("➕ Aggiungi risultati OLS al Results Summary"):
-        if "report_items" not in st.session_state:
-            st.session_state.report_items = []
-        st.session_state.report_items.append({
-            "type": "regression_ols",
-            "title": f"Regressione OLS — {target}",
-            "content": {
-                "nobs": int(model.nobs),
-                "r2": float(model.rsquared),
-                "r2_adj": float(model.rsquared_adj),
-                "aic": float(model.aic),
-                "bic": float(model.bic),
-                "coefficients": df_coefs.round(6).to_dict(orient="records"),
-                "vif": vif_df.round(6).to_dict(orient="records")
-            }
-        })
+        with st.spinner("Salvo i risultati nel Results Summary…"):
+            if "report_items" not in st.session_state:
+                st.session_state.report_items = []
+            st.session_state.report_items.append({
+                "type": "regression_ols",
+                "title": f"Regressione OLS — {target}",
+                "content": {
+                    "nobs": int(model.nobs),
+                    "r2": float(model.rsquared),
+                    "r2_adj": float(model.rsquared_adj),
+                    "aic": float(model.aic),
+                    "bic": float(model.bic),
+                    "coefficients": df_coefs.round(6).to_dict(orient="records"),
+                    "vif": vif_df.round(6).to_dict(orient="records")
+                }
+            })
         st.success("Modello OLS aggiunto al Results Summary.")
 
     with st.expander("ℹ️ Approfondimento — Analisi dei residui"):
@@ -315,16 +326,19 @@ elif model_type == "Logistica (binaria)":
     y_bin = (y_raw == positive_class).astype(int)
 
     # design matrix
-    y, X = _make_design_matrix(df.assign(__y__=y_bin), "__y__", X_sel, dropna=True)
+    with st.spinner("Preparo la matrice del modello…"):
+        y, X = _make_design_matrix(df.assign(__y__=y_bin), "__y__", X_sel, dropna=True)
     if X.shape[0] < 10 or X.shape[1] < 2:
         st.error("Dati insufficienti per stimare il modello (pochi casi utili o nessun predittore dopo la codifica).")
         st.stop()
 
     # statsmodels Logit + (tentativo) covarianze robuste
     try:
-        logit = sm.Logit(y, X).fit(disp=False)
+        with st.spinner("Stimo il modello logit…"):
+            logit = sm.Logit(y, X).fit(disp=False)
         try:
-            logit = logit.get_robustcov_results(cov_type="HC3")
+            with st.spinner("Calcolo errori standard robusti (HC3)…"):
+                logit = logit.get_robustcov_results(cov_type="HC3")
         except Exception:
             pass
     except Exception as e:
@@ -334,20 +348,21 @@ elif model_type == "Logistica (binaria)":
     st.subheader("Risultati modello (Logistica binaria)")
 
     # Coefficienti → Odds Ratio con IC95%
-    params = logit.params
-    conf = logit.conf_int()
-    or_ = np.exp(params)
-    or_lo = np.exp(conf[0])
-    or_hi = np.exp(conf[1])
-    pvals = logit.pvalues
+    with st.spinner("Calcolo Odds Ratio, IC95% e p-value…"):
+        params = logit.params
+        conf = logit.conf_int()
+        or_ = np.exp(params)
+        or_lo = np.exp(conf[0])
+        or_hi = np.exp(conf[1])
+        pvals = logit.pvalues
 
-    df_or = pd.DataFrame({
-        "term": params.index,
-        "OR": or_.values,
-        "CI 2.5%": or_lo.values,
-        "CI 97.5%": or_hi.values,
-        "p-value": pvals.values
-    })
+        df_or = pd.DataFrame({
+            "term": params.index,
+            "OR": or_.values,
+            "CI 2.5%": or_lo.values,
+            "CI 97.5%": or_hi.values,
+            "p-value": pvals.values
+        })
     st.markdown("**Odds Ratio (IC95%) e p-value**")
     st.dataframe(df_or.round(4), use_container_width=True)
     st.caption(f"**Come leggere — Tabella coefficienti (Logistica):** l’**OR** è l’effetto moltiplicativo sul rapporto di odds della classe positiva (**{positive_class}**). OR>1 ↑ probabilità relativa, OR<1 ↓. Se l’IC95% non include 1, l’effetto è significativo.")
@@ -370,40 +385,42 @@ elif model_type == "Logistica (binaria)":
 
     # Valutazione predittiva — grafici affiancati
     st.subheader("Valutazione predittiva")
-    try:
-        y_pred_prob = logit.predict(X)
-    except Exception:
-        # fallback per alcuni oggetti robusti
-        y_pred_prob = 1 / (1 + np.exp(-(X @ params)))
+    with st.spinner("Calcolo probabilità predette…"):
+        try:
+            y_pred_prob = logit.predict(X)
+        except Exception:
+            # fallback per alcuni oggetti robusti
+            y_pred_prob = 1 / (1 + np.exp(-(X @ params)))
 
     thresh = st.slider("Soglia di classificazione", 0.05, 0.95, 0.50, step=0.01)
     y_pred = (y_pred_prob >= thresh).astype(int)
 
     if _HAS_SKLEARN:
-        fpr, tpr, _ = roc_curve(y, y_pred_prob)
-        auc_val = auc(fpr, tpr)
-
         col1, col2 = st.columns(2)
 
         with col1:
-            figroc = go.Figure()
-            figroc.add_trace(go.Scatter(x=fpr, y=tpr, mode="lines", name=f"ROC (AUC={auc_val:.3f})"))
-            figroc.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="lines", name="No skill", line=dict(dash="dash")))
-            figroc.update_layout(title="ROC curve", xaxis_title="FPR", yaxis_title="TPR")
-            st.plotly_chart(figroc, use_container_width=True)
+            with st.spinner("Traccio curva ROC e calcolo AUC…"):
+                fpr, tpr, _ = roc_curve(y, y_pred_prob)
+                auc_val = auc(fpr, tpr)
+                figroc = go.Figure()
+                figroc.add_trace(go.Scatter(x=fpr, y=tpr, mode="lines", name=f"ROC (AUC={auc_val:.3f})"))
+                figroc.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="lines", name="No skill", line=dict(dash="dash")))
+                figroc.update_layout(title="ROC curve", xaxis_title="FPR", yaxis_title="TPR")
+                st.plotly_chart(figroc, use_container_width=True)
             st.caption("**Come leggere — ROC curve:** **TPR** (=Recall=TP/(TP+FN)) vs **FPR** (=FP/(FP+TN)). Più la curva si allontana dalla diagonale, migliore la discriminazione. **AUC**: 0.5 casuale; >0.7 accettabile; >0.8 buona; >0.9 eccellente.")
 
         with col2:
-            cm = confusion_matrix(y, y_pred, labels=[1,0])
-            figcm = go.Figure(data=go.Heatmap(
-                z=cm, x=["Pred 1","Pred 0"], y=["True 1","True 0"],
-                text=cm, texttemplate="%{text}", colorscale="Blues"))
-            figcm.update_layout(title="Confusion matrix", xaxis_title="", yaxis_title="")
-            st.plotly_chart(figcm, use_container_width=True)
+            with st.spinner("Genero confusion matrix…"):
+                cm = confusion_matrix(y, y_pred, labels=[1,0])
+                figcm = go.Figure(data=go.Heatmap(
+                    z=cm, x=["Pred 1","Pred 0"], y=["True 1","True 0"],
+                    text=cm, texttemplate="%{text}", colorscale="Blues"))
+                figcm.update_layout(title="Confusion matrix", xaxis_title="", yaxis_title="")
+                st.plotly_chart(figcm, use_container_width=True)
             st.caption("**Acronimi:** **TP**=Vero Positivo, **TN**=Vero Negativo, **FP**=Falso Positivo, **FN**=Falso Negativo. Regolando la **soglia** bilancia il trade-off tra FP e FN.")
 
-        # Metriche con CI bootstrap stratificati
-        metrics_df = _metrics_with_ci(y.values if isinstance(y, pd.Series) else y, y_pred, n_boot=500, alpha=0.05).round(3)
+        with st.spinner("Calcolo metriche di classificazione con IC bootstrap…"):
+            metrics_df = _metrics_with_ci(y.values if isinstance(y, pd.Series) else y, y_pred, n_boot=500, alpha=0.05).round(3)
         st.dataframe(metrics_df, use_container_width=True)
         st.caption("**Metriche di classificazione:** **Precision**=TP/(TP+FP); **Recall/Sensibilità (TPR)**=TP/(TP+FN); **Accuracy**=(TP+TN)/Totale; **F1**=media armonica di Precision e Recall. **CI 95%** con **bootstrap stratificato (n=500)**.")
     else:
@@ -412,21 +429,22 @@ elif model_type == "Logistica (binaria)":
 
     # ➕ Salva nel Results Summary
     if st.button("➕ Aggiungi risultati Logit al Results Summary"):
-        if "report_items" not in st.session_state:
-            st.session_state.report_items = []
-        st.session_state.report_items.append({
-            "type": "regression_logit",
-            "title": f"Regressione logistica — {target} (positiva: {positive_class})",
-            "content": {
-                "nobs": int(getattr(logit, "nobs", len(y))),
-                "loglik": llf,
-                "loglik_null": llnull,
-                "pseudo_r2_mcfadden": float(pseudo_r2) if np.isfinite(pseudo_r2) else None,
-                "aic": float(getattr(logit, "aic", np.nan)),
-                "bic": float(getattr(logit, "bic", np.nan)),
-                "odds_ratios": df_or.round(6).to_dict(orient="records")
-            }
-        })
+        with st.spinner("Salvo i risultati nel Results Summary…"):
+            if "report_items" not in st.session_state:
+                st.session_state.report_items = []
+            st.session_state.report_items.append({
+                "type": "regression_logit",
+                "title": f"Regressione logistica — {target} (positiva: {positive_class})",
+                "content": {
+                    "nobs": int(getattr(logit, "nobs", len(y))),
+                    "loglik": llf,
+                    "loglik_null": llnull,
+                    "pseudo_r2_mcfadden": float(pseudo_r2) if np.isfinite(pseudo_r2) else None,
+                    "aic": float(getattr(logit, "aic", np.nan)),
+                    "bic": float(getattr(logit, "bic", np.nan)),
+                    "odds_ratios": df_or.round(6).to_dict(orient="records")
+                }
+            })
         st.success("Modello logit aggiunto al Results Summary.")
 
 # ===========================================================
@@ -452,56 +470,61 @@ elif model_type == "Logistica regolarizzata (L1/L2)":
     solver = "liblinear" if penalty == "l1" else "lbfgs"
     max_iter = st.number_input("Max iterazioni", 50, 5000, 1000, step=50)
 
-    y, X = _make_design_matrix(df.assign(__y__=y_bin), "__y__", X_sel, dropna=True)
+    with st.spinner("Preparo la matrice del modello…"):
+        y, X = _make_design_matrix(df.assign(__y__=y_bin), "__y__", X_sel, dropna=True)
     if X.shape[0] < 10 or X.shape[1] < 2:
         st.error("Dati insufficienti per stimare il modello (pochi casi utili o nessun predittore dopo la codifica).")
         st.stop()
 
-    pipe = make_pipeline(
-        StandardScaler(with_mean=False),  # compatibile con sparse/dummies
-        LogisticRegression(penalty=penalty, C=C_val, solver=solver, max_iter=int(max_iter))
-    )
-    pipe.fit(X, y)
+    with st.spinner("Stimo la logistica regolarizzata…"):
+        pipe = make_pipeline(
+            StandardScaler(with_mean=False),  # compatibile con sparse/dummies
+            LogisticRegression(penalty=penalty, C=C_val, solver=solver, max_iter=int(max_iter))
+        )
+        pipe.fit(X, y)
 
     st.subheader("Risultati modello (Logistica regolarizzata)")
-    lr = pipe.named_steps["logisticregression"]
-    coefs = lr.coef_[0]
-    ORs = np.exp(coefs)
-    coef_df = pd.DataFrame({"term": X.columns, "coef": coefs, "OR (exp coef)": ORs}).round(4)
+    with st.spinner("Estraggo e trasformo i coefficienti…"):
+        lr = pipe.named_steps["logisticregression"]
+        coefs = lr.coef_[0]
+        ORs = np.exp(coefs)
+        coef_df = pd.DataFrame({"term": X.columns, "coef": coefs, "OR (exp coef)": ORs}).round(4)
     st.dataframe(coef_df, use_container_width=True)
     st.caption("**Come leggere — Coefficienti penalizzati:** la penalizzazione riduce overfitting/collinearità. Con **L1** alcuni coefficienti possono diventare 0 (selezione di variabili).")
 
     # Prestazioni — grafici affiancati
     st.subheader("Valutazione predittiva")
-    y_pred_prob = pipe.predict_proba(X)[:, 1]
+    with st.spinner("Calcolo probabilità e classi predette…"):
+        y_pred_prob = pipe.predict_proba(X)[:, 1]
     thresh = st.slider("Soglia di classificazione", 0.05, 0.95, 0.50, step=0.01, key="thresh_reg")
     y_pred = (y_pred_prob >= thresh).astype(int)
 
     if _HAS_SKLEARN:
-        fpr, tpr, _ = roc_curve(y, y_pred_prob)
-        auc_val = auc(fpr, tpr)
-
         col1, col2 = st.columns(2)
 
         with col1:
-            figroc = go.Figure()
-            figroc.add_trace(go.Scatter(x=fpr, y=tpr, mode="lines", name=f"ROC (AUC={auc_val:.3f})"))
-            figroc.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="lines", name="No skill", line=dict(dash="dash")))
-            figroc.update_layout(title="ROC curve", xaxis_title="FPR", yaxis_title="TPR")
-            st.plotly_chart(figroc, use_container_width=True)
+            with st.spinner("Traccio curva ROC e calcolo AUC…"):
+                fpr, tpr, _ = roc_curve(y, y_pred_prob)
+                auc_val = auc(fpr, tpr)
+                figroc = go.Figure()
+                figroc.add_trace(go.Scatter(x=fpr, y=tpr, mode="lines", name=f"ROC (AUC={auc_val:.3f})"))
+                figroc.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="lines", name="No skill", line=dict(dash="dash")))
+                figroc.update_layout(title="ROC curve", xaxis_title="FPR", yaxis_title="TPR")
+                st.plotly_chart(figroc, use_container_width=True)
             st.caption("**Come leggere — ROC curve:** TPR (Recall) vs FPR; l’**AUC** riassume la discriminazione del modello su tutte le soglie.")
 
         with col2:
-            cm = confusion_matrix(y, y_pred, labels=[1,0])
-            figcm = go.Figure(data=go.Heatmap(
-                z=cm, x=["Pred 1","Pred 0"], y=["True 1","True 0"],
-                text=cm, texttemplate="%{text}", colorscale="Blues"))
-            figcm.update_layout(title="Confusion matrix", xaxis_title="", yaxis_title="")
-            st.plotly_chart(figcm, use_container_width=True)
+            with st.spinner("Genero confusion matrix…"):
+                cm = confusion_matrix(y, y_pred, labels=[1,0])
+                figcm = go.Figure(data=go.Heatmap(
+                    z=cm, x=["Pred 1","Pred 0"], y=["True 1","True 0"],
+                    text=cm, texttemplate="%{text}", colorscale="Blues"))
+                figcm.update_layout(title="Confusion matrix", xaxis_title="", yaxis_title="")
+                st.plotly_chart(figcm, use_container_width=True)
             st.caption("**Acronimi:** **TP**=Vero Positivo, **TN**=Vero Negativo, **FP**=Falso Positivo, **FN**=Falso Negativo. **TPR**=TP/(TP+FN); **FPR**=FP/(FP+TN).")
 
-        # Metriche con CI bootstrap stratificati
-        metrics_df = _metrics_with_ci(y.values if isinstance(y, pd.Series) else y, y_pred, n_boot=500, alpha=0.05).round(3)
+        with st.spinner("Calcolo metriche di classificazione con IC bootstrap…"):
+            metrics_df = _metrics_with_ci(y.values if isinstance(y, pd.Series) else y, y_pred, n_boot=500, alpha=0.05).round(3)
         st.dataframe(metrics_df, use_container_width=True)
         st.caption("**Metriche di classificazione:** **Precision**=TP/(TP+FP); **Recall/Sensibilità (TPR)**=TP/(TP+FN); **Accuracy**=(TP+TN)/Totale; **F1**=media armonica di Precision e Recall. **CI 95%** con bootstrap stratificato (n=500).")
     else:
@@ -510,17 +533,18 @@ elif model_type == "Logistica regolarizzata (L1/L2)":
 
     # ➕ Salva nel Results Summary
     if st.button("➕ Aggiungi risultati Logistica regolarizzata al Results Summary"):
-        if "report_items" not in st.session_state:
-            st.session_state.report_items = []
-        st.session_state.report_items.append({
-            "type": "regression_logit_regularized",
-            "title": f"Logistica regolarizzata — {target} (positiva: {positive_class})",
-            "content": {
-                "penalty": penalty,
-                "C": float(C_val),
-                "coefficients": coef_df.to_dict(orient="records")
-            }
-        })
+        with st.spinner("Salvo i risultati nel Results Summary…"):
+            if "report_items" not in st.session_state:
+                st.session_state.report_items = []
+            st.session_state.report_items.append({
+                "type": "regression_logit_regularized",
+                "title": f"Logistica regolarizzata — {target} (positiva: {positive_class})",
+                "content": {
+                    "penalty": penalty,
+                    "C": float(C_val),
+                    "coefficients": coef_df.to_dict(orient="records")
+                }
+            })
         st.success("Modello logit regolarizzato aggiunto al Results Summary.")
 
 # ===========================================================
@@ -528,13 +552,15 @@ elif model_type == "Logistica regolarizzata (L1/L2)":
 # ===========================================================
 else:  # "Poisson (conteggi)"
     # y intero (conteggi) già verificato sopra
-    y, X = _make_design_matrix(df, target, X_sel, dropna=True)
+    with st.spinner("Preparo la matrice del modello…"):
+        y, X = _make_design_matrix(df, target, X_sel, dropna=True)
     if X.shape[0] < 10 or X.shape[1] < 2:
         st.error("Dati insufficienti per stimare il modello di Poisson.")
         st.stop()
 
     try:
-        model = sm.GLM(y, X, family=sm.families.Poisson()).fit()
+        with st.spinner("Stimo il modello GLM di Poisson…"):
+            model = sm.GLM(y, X, family=sm.families.Poisson()).fit()
     except Exception as e:
         st.error(f"Errore nella stima del modello di Poisson: {e}")
         st.stop()
@@ -542,20 +568,21 @@ else:  # "Poisson (conteggi)"
     st.subheader("Risultati modello (GLM Poisson)")
 
     # Coefficienti → IRR con IC95%
-    params = model.params
-    conf = model.conf_int()
-    irr = np.exp(params)
-    irr_lo = np.exp(conf[0])
-    irr_hi = np.exp(conf[1])
-    pvals = model.pvalues
+    with st.spinner("Calcolo IRR, IC95% e p-value…"):
+        params = model.params
+        conf = model.conf_int()
+        irr = np.exp(params)
+        irr_lo = np.exp(conf[0])
+        irr_hi = np.exp(conf[1])
+        pvals = model.pvalues
 
-    df_irr = pd.DataFrame({
-        "term": params.index,
-        "IRR": irr.values,
-        "CI 2.5%": irr_lo.values,
-        "CI 97.5%": irr_hi.values,
-        "p-value": pvals.values
-    })
+        df_irr = pd.DataFrame({
+            "term": params.index,
+            "IRR": irr.values,
+            "CI 2.5%": irr_lo.values,
+            "CI 97.5%": irr_hi.values,
+            "p-value": pvals.values
+        })
     st.markdown("**Incidence Rate Ratio (IRR, IC95%) e p-value**")
     st.dataframe(df_irr.round(4), use_container_width=True)
     st.caption("**Come leggere — Tabella coefficienti (Poisson):** l’**IRR** è l’effetto moltiplicativo sul **tasso atteso di eventi**. IRR>1 → aumento; IRR<1 → diminuzione. Se l’IC95% non include 1, l’effetto è significativo.")
@@ -572,19 +599,20 @@ else:  # "Poisson (conteggi)"
 
     # ➕ Salva nel Results Summary
     if st.button("➕ Aggiungi risultati Poisson al Results Summary"):
-        if "report_items" not in st.session_state:
-            st.session_state.report_items = []
-        st.session_state.report_items.append({
-            "type": "regression_poisson",
-            "title": f"Regressione Poisson — {target}",
-            "content": {
-                "nobs": int(model.nobs),
-                "deviance": float(model.deviance),
-                "pearson_chi2": float(model.pearson_chi2),
-                "aic": float(model.aic),
-                "irr": df_irr.round(6).to_dict(orient="records")
-            }
-        })
+        with st.spinner("Salvo i risultati nel Results Summary…"):
+            if "report_items" not in st.session_state:
+                st.session_state.report_items = []
+            st.session_state.report_items.append({
+                "type": "regression_poisson",
+                "title": f"Regressione Poisson — {target}",
+                "content": {
+                    "nobs": int(model.nobs),
+                    "deviance": float(model.deviance),
+                    "pearson_chi2": float(model.pearson_chi2),
+                    "aic": float(model.aic),
+                    "irr": df_irr.round(6).to_dict(orient="records")
+                }
+            })
         st.success("Modello di Poisson aggiunto al Results Summary.")
 
     with st.expander("ℹ️ Approfondimento — Poisson e overdispersione"):
