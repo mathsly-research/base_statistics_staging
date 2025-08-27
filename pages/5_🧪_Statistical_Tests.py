@@ -291,3 +291,25 @@ if st.button("➕ Aggiungi risultati al Results Summary"):
         }
         st.session_state.report_items.append(entry)
     st.success("Risultati aggiunti al Results Summary.")
+
+# --- Post-hoc ---
+if is_cont and len(set(df[group].dropna())) > 2:
+    global_test = results[0]  # ANOVA o Kruskal
+    if global_test.pvalue is not None and global_test.pvalue < 0.05:
+        st.subheader("🔎 Confronti post-hoc")
+        from core.posthoc import tukey_hsd, dunn_test
+        if path == "Parametrici":
+            tukey = tukey_hsd(df[y], df[group])
+            if tukey is not None:
+                st.write("**Tukey HSD**")
+                st.dataframe(tukey, use_container_width=True)
+            else:
+                st.info("Tukey HSD non disponibile (statsmodels mancante).")
+        else:
+            dunn = dunn_test(df[y], df[group], p_adjust="bonferroni")
+            if dunn is not None:
+                st.write("**Dunn test (Bonferroni)**")
+                st.dataframe(dunn, use_container_width=True)
+            else:
+                st.info("Dunn test non disponibile (scikit-posthocs mancante).")
+
