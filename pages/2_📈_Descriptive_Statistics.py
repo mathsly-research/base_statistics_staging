@@ -1,61 +1,84 @@
+
+# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-from scipy import stats
-import io
-from docx import Document
-from docx.shared import Inches, Pt, RGBColor
-from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
-from PIL import Image
+from core.state import init_state
+from core.stats import summarize_continuous, summarize_categorical
+from core.validate import dataset_diagnostics
+from core.ui import quality_alert, show_missing_table
 
-st.set_page_config(page_title="Statistical App", layout="wide")
-st.title("Step 2: Descriptive Statistics")
+init_state()
 
-if "df" not in st.session_state:
-    st.session_state.df = None
+st.title("📈 Step 2 — Descriptive Statistics")
 
-if st.session_state.df is not None:
-    df = st.session_state.df
+if st.session_state.df is None:
+    st.warning("Nessun dataset in memoria. Carichi un file nella pagina **Upload Dataset**.")
+    st.page_link("pages/1_📂_Upload_Dataset.py", label="➡️ Vai a Upload Dataset", icon="📂")
+    st.stop()
 
-    st.markdown("""
-    ℹ️ **This section helps you understand the structure and quality of your dataset.**  
-    You will see missing values, variable types, and descriptive summaries.
-    """)
+df = st.session_state.df
 
-    st.subheader("🧪 Data Types")
-    if st.checkbox("Show detected variable types"):
-        types_df = pd.DataFrame(df.dtypes, columns=["Type"])
-        st.dataframe(types_df)
+with st.expander("🔎 Stato dataset e qualità (rapido)", expanded=False):
+    diag = st.session_state.diagnostics or dataset_diagnostics(df)
+    st.session_state.diagnostics = diag
+    quality_alert(diag)
+    with st.expander("Dettaglio missing per colonna", expanded=False):
+        show_missing_table(diag)
 
-    st.subheader("❓ Missing Values")
-    na_df = df.isnull().sum().to_frame("Missing Values")
-    na_df["Percent"] = (na_df["Missing Values"] / len(df) * 100).round(1)
-    na_filtered = na_df[na_df["Missing Values"] > 0].sort_values(by="Missing Values", ascending=False)
-    st.dataframe(na_filtered)
+st.subheader("Selezione variabili")
+num_cols_all = list(df.select_dtypes(include="number").columns)
+cat_cols_all = list(df.select_dtypes(include=["object","category","bool"]).columns)
 
-    st.subheader("📏 Continuous Variables")
-    cont = df.select_dtypes(include=np.number)
-    if cont.shape[1] > 0:
-        summary = cont.describe().T
-        st.markdown("Basic statistics for each numeric variable:")
-        st.dataframe(summary)
-    else:
-        st.info("No numeric variables detected.")
+c1, c2 = st.columns(2)
+with c1:
+    num_cols = st.multiselect("Variabili **continue**", num_cols_all, default=num_cols_all)
+with c2:
+    cat_cols = st.multiselect("Variabili **categoriche**", cat_cols_all, default=cat_cols_all)
 
-    st.subheader("🌤 Categorical Variables")
-    cat_vars = df.select_dtypes(include=["object", "category", "bool"]).columns
-    if len(cat_vars) > 0:
-        for col in cat_vars:
-            st.markdown(f"**Variable: `{col}`**")
-            freq = df[col].value_counts(dropna=False).to_frame("Count")
-            freq["Percent"] = round(100 * freq["Count"] / len(df), 1)
-            st.dataframe(freq)
-    else:
-        st.info("No categorical variables detected.")
+st.subheader("Opzioni per le variabili continue")
+c3, c4, c5 = st.columns([1,1,1])
+with c3:
+    exclude_outliers = st.checkbox("Escludi outlier (regola IQR)", value=False, help="Esclude valori fuori da [Q1-1.5*IQR, Q3+1.5*IQR] per ciascuna variabile.")
+with c4:
+    transform = st.radio("Trasformazione", options=["none","log10","box-cox"], index=0, help="Per Box-Cox servono valori positivi; se necessario viene applicato uno shift automatico.")
+with c5:
+    show_raw = st.checkbox("Mostra anche versione **grezza**", value=False)
 
-    st.success("✅ You're now ready to explore your variables' distributions in the next section.")
+@st.cache_data(show_spinner=False)
+def compute_summaries(df_in: pd.DataFrame, num_cols, cat_cols, exclude_outliers, transform):
+    cont = summarize_continuous(df_in, cols=num_cols, exclude_outliers=exclude_outliers, transform=transform if transform!="none" else None)
+    cat = summarize_categorical(df_in, cols=cat_cols)
+    return cont, cat
 
-else:
-    st.warning("⚠️ Please upload a dataset first in the 'Upload Dataset' section.")
+cont_summary, cat_summary = compute_summaries(df, tuple(num_cols), tuple(cat_cols), exclude_outliers, transform)
+
+st.subheader("Risultati — Continue")
+st.dataframe(cont_summary, use_container_width=True)
+st.download_button("Scarica CSV (continue)", cont_summary.to_csv(index=False).encode("utf-8"), file_name="descriptive_continuous.csv")
+
+st.subheader("Risultati — Categoriche")
+st.dataframe(cat_summary, use_container_width=True)
+st.download_button("Scarica CSV (categoriche)", cat_summary.to_csv(index=False).encode("utf-8"), file_name="descriptive_categorical.csv")
+
+# Opzionale: mostra versione grezza per confronto
+if show_raw and transform != "none":
+    st.markdown("#### Confronto (senza trasformazioni, senza esclusione outlier)")
+    cont_raw, _ = compute_summaries(df, tuple(num_cols), tuple(cat_cols), False, "none")
+    st.dataframe(cont_raw, use_container_width=True)
+
+# Aggiungi al report
+st.divider()
+if st.button("➕ Aggiungi queste tabelle al Results Summary"):
+    st.session_state.report_items.append({
+        "type": "table",
+        "title": "Descriptive — Continuous",
+        "data": cont_summary.to_dict(orient="records")
+    })
+    st.session_state.report_items.append({
+        "type": "table",
+        "title": "Descriptive — Categorical",
+        "data": cat_summary.to_dict(orient="records")
+    })
+    st.success("Tabelle aggiunte al Results Summary.")
+
+st.info("Suggerimento: passi alla sezione **Explore Distributions** per visualizzare grafici per singola variabile.")
