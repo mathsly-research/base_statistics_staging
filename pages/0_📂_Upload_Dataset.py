@@ -1,85 +1,78 @@
-
+# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
+from pathlib import Path
+
 from core.state import init_state
-from core.io import read_any, load_sample
-from core.validate import dataset_diagnostics
-from core.ui import quality_alert, show_missing_table
 
+# ---------------------------------
+# Init
+# ---------------------------------
 init_state()
+st.title("📂 Step 0 — Upload Dataset")
 
-st.title("📂 Step Iniziale — Upload Dataset")
+# ---------------------------------
+# Upload file
+# ---------------------------------
+uploaded_file = st.file_uploader("Carica il tuo dataset (CSV o Excel)", type=["csv", "xlsx"])
 
-st.markdown("""
-Carichi un file **CSV**, **Excel (.xlsx/.xls)** o **Parquet**.
-- Ogni riga = un'osservazione (es. paziente)
-- Ogni colonna = variabile (es. Età, Sesso, BMI)
-- Dimensione massima consigliata: ~200 MB
-""")
-
-with st.expander("Suggerimenti sul formato", expanded=False):
-    st.markdown("""
-- Eviti header duplicati o celle unite in Excel.
-- Per CSV, usi separatore **virgola** o **punto e virgola**.
-- Le date in formato ISO (es. `2024-03-01`).
-""")
-
-c1, c2 = st.columns([2,1])
-with c1:
-    file = st.file_uploader("Selezioni un file", type=["csv","xlsx","xls","parquet"])
-with c2:
-    st.markdown("**Oppure**")
-    if st.button("Usa dataset di esempio"):
-        df_demo = load_sample()
-        st.session_state.df = df_demo
-        st.session_state.diagnostics = dataset_diagnostics(df_demo)
-        st.success("Dataset di esempio caricato.")
-        st.experimental_rerun()
-
-delimiter = st.selectbox("Separatore (solo per CSV)", ["Auto", ",", ";", "\t"], index=0)
-
-if file is not None:
+if uploaded_file is not None:
     try:
-        sep = None if delimiter == "Auto" else ("," if delimiter == "," else ("\t" if delimiter == "\t" else ";"))
-        df = read_any(file, delimiter=sep)
-        # Pulizia semplice: rimozione colonne totalmente vuote
-        df = df.dropna(axis=1, how="all")
-        st.session_state.df = df
-        st.session_state.diagnostics = dataset_diagnostics(df)
-        st.success("✅ Dataset caricato con successo.")
-        with st.expander("Anteprima (prime 10 righe)", expanded=True):
-            st.dataframe(df.head(10), use_container_width=True)
-        st.info(f"Righe: {df.shape[0]} • Colonne: {df.shape[1]}")
+        if uploaded_file.name.endswith(".csv"):
+            df = pd.read_csv(uploaded_file)
+        else:
+            df = pd.read_excel(uploaded_file)
+
+        # Salvataggio nel session state
+        st.session_state.df = df.copy()
+        st.session_state.df_original = df.copy()   # sempre intatto
+        st.session_state.df_working = df.copy()    # usato per cleaning/filtri
+
+        st.success(f"✅ Dataset caricato correttamente: {df.shape[0]} righe × {df.shape[1]} colonne")
+
+        # Preview
+        st.subheader("Anteprima dataset")
+        st.dataframe(df.head(), use_container_width=True)
+
+        # Info variabili
+        st.subheader("📋 Informazioni sulle variabili")
+        info = pd.DataFrame({
+            "Colonna": df.columns,
+            "Tipo": [str(df[c].dtype) for c in df.columns],
+            "Valori unici": [df[c].nunique() for c in df.columns],
+            "Missing": [df[c].isna().sum() for c in df.columns]
+        })
+        st.dataframe(info, use_container_width=True)
+
     except Exception as e:
-        st.error(f"Errore in lettura: {e}")
+        st.error(f"Errore durante la lettura del file: {e}")
 
-if st.session_state.df is not None:
-    st.subheader("🔎 Validazione rapida")
-    diag = st.session_state.diagnostics or dataset_diagnostics(st.session_state.df)
-    st.session_state.diagnostics = diag
-    quality_alert(diag)
-    with st.expander("Dettaglio missing per colonna"):
-        show_missing_table(diag)
+else:
+    st.info("Carica un file per iniziare.")
 
-    # Azioni rapide
-    st.markdown("### Azioni rapide")
-    colA, colB = st.columns(2)
-    with colA:
-        if diag.get("n_duplicates", 0) > 0 and st.button("Rimuovi righe duplicate"):
-            st.session_state.df = st.session_state.df.drop_duplicates().reset_index(drop=True)
-            st.session_state.diagnostics = dataset_diagnostics(st.session_state.df)
-            st.success("Righe duplicate rimosse.")
-            st.experimental_rerun()
-    with colB:
-        constant_cols = diag.get("constant_cols", [])
-        if constant_cols and st.button("Elimina colonne costanti"):
-            st.session_state.df = st.session_state.df.drop(columns=constant_cols, errors="ignore")
-            st.session_state.diagnostics = dataset_diagnostics(st.session_state.df)
-            st.success("Colonne costanti eliminate.")
-            st.experimental_rerun()
+# ---------------------------------
+# Navigazione agli step successivi
+# ---------------------------------
+PAGES = [
+    ("pages/1_🧹_Data_Cleaning.py",        "Vai a: Cleaning",               "🧹"),
+    ("pages/2_📈_Descriptive_Statistics.py","Vai a: Descrittive",            "📈"),
+    ("pages/3_📊_Explore_Distributions.py", "Vai a: Esplora distribuzioni",  "📊"),
+    ("pages/4_🔍_Assumption_Checks.py",     "Vai a: Assumption checks",      "🔍"),
+    ("pages/5_🧪_Statistical_Tests.py",     "Vai a: Test statistici",        "🧪"),
+    ("pages/6_🔗_Correlation.py",           "Vai a: Correlazioni",           "🔗"),
+    # In futuro: Results Summary
+    # ("pages/7_🧾_Results_Summary.py",     "Vai a: Results Summary",        "🧾"),
+]
 
-    st.divider()
-    st.markdown("### Prossimi passi")
-    st.page_link("pages/2_📈_Descriptive_Statistics.py", label="Vai a: Descrizione del campione", icon="📈")
-    st.page_link("pages/4_📊_Explore_Distributions.py", label="Vai a: Esplora distribuzioni", icon="📊")
-    st.page_link("pages/5_🧪_Statistical_Tests.py", label="Vai a: Test statistici", icon="🧪")
+st.divider()
+st.subheader("Navigazione")
+
+col_nav1, col_nav2, col_nav3 = st.columns(3)
+cols = [col_nav1, col_nav2, col_nav3]
+
+i = 0
+for page_path, label, icon in PAGES:
+    if Path(page_path).exists():
+        with cols[i % 3]:
+            st.page_link(page_path, label=f"{label}", icon=icon)
+        i += 1
