@@ -1,21 +1,20 @@
-
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 import pandas as pd
 import numpy as np
-from typing import Iterable, Optional, Dict, Any, Tuple
+from typing import Iterable, Optional, Tuple
 from dataclasses import dataclass
 
 try:
     from scipy import stats as spstats
 except Exception:
-    spstats = None  # Box-Cox optional
+    spstats = None  # Box-Cox opzionale
 
 @dataclass
 class TransformInfo:
     name: str
     shift: float | None = None
-    lam: float | None = None  # for Box-Cox
+    lam: float | None = None  # per Box-Cox
 
 def _iqr_bounds(s: pd.Series) -> Tuple[float, float]:
     q1, q3 = s.quantile(0.25), s.quantile(0.75)
@@ -38,7 +37,6 @@ def _apply_transform(s: pd.Series, transform: Optional[str]) -> tuple[pd.Series,
         return out, TransformInfo(name="log10", shift=shift)
     if transform.lower() == "box-cox":
         if spstats is None:
-            # fallback: behave like no transform
             return s, None
         shift = 0.0
         if (s_clean <= 0).any():
@@ -55,7 +53,6 @@ def summarize_continuous(
     exclude_outliers: bool = False,
     transform: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Return a table of descriptive stats for numeric variables."""
     if cols is None:
         cols = list(df.select_dtypes(include="number").columns)
     out_rows = []
@@ -113,32 +110,33 @@ def summarize_categorical(
     df: pd.DataFrame,
     cols: Optional[Iterable[str]] = None,
 ) -> pd.DataFrame:
-    """Return a table of categorical summaries per variable (mode and cardinality)."""
+    """Distribuzione completa di frequenze e percentuali per ciascuna variabile categorica."""
     if cols is None:
         cols = list(df.select_dtypes(include=["object","category","bool"]).columns)
+
     rows = []
     for c in cols:
         s = df[c]
-        n = int(s.notna().sum())
-        nmiss = int(s.isna().sum())
-        miss_pct = (nmiss / s.size * 100.0) if s.size else 0.0
-        nunique = int(s.nunique(dropna=True))
-        top_val = None
-        top_freq = 0
-        if n > 0:
-            vc = s.dropna().value_counts()
-            if len(vc) > 0:
-                top_val = str(vc.index[0])
-                top_freq = int(vc.iloc[0])
-        top_pct = (top_freq / n * 100.0) if n else 0.0
-        rows.append(dict(
-            variable=c,
-            n=n,
-            missing_pct=round(miss_pct,1),
-            n_unique=nunique,
-            mode=top_val,
-            mode_freq=top_freq,
-            mode_pct=round(top_pct,1),
-        ))
+        n_total = int(s.size)
+        n_missing = int(s.isna().sum())
+        if n_total == 0:
+            continue
+        freq_table = s.value_counts(dropna=True)
+        for cat, freq in freq_table.items():
+            pct = freq / n_total * 100.0
+            rows.append({
+                "Variabile": c,
+                "Categoria": str(cat),
+                "Frequenza": int(freq),
+                "%": round(pct, 1)
+            })
+        if n_missing > 0:
+            rows.append({
+                "Variabile": c,
+                "Categoria": "(Missing)",
+                "Frequenza": n_missing,
+                "%": round(n_missing / n_total * 100.0, 1)
+            })
+
     out = pd.DataFrame(rows)
-    return out[["variable","n","missing_pct","n_unique","mode","mode_freq","mode_pct"]]
+    return out[["Variabile","Categoria","Frequenza","%"]]
