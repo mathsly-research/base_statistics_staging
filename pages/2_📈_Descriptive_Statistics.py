@@ -222,42 +222,23 @@ if show_raw and transform != "Nessuna":
 # -------------------------
 st.subheader("Risultati — Variabili categoriche")
 
-def format_categorical_simple(df_in: pd.DataFrame) -> pd.DataFrame:
-    out = df_in.rename(columns={
-        "variable": "Variabile",
-        "n": "N",
-        "missing_pct": "% Missing",
-        "n_unique": "Categorie",
-        "mode": "Categoria più frequente",
-        "mode_freq": "Frequenza",
-        "mode_pct": "% Categoria più freq."
-    }).copy()
-    out["% Missing"] = out["% Missing"].astype(float).round(perc_dec)
-    out["% Categoria più freq."] = out["% Categoria più freq."].astype(float).round(perc_dec)
-    return out
-
-if simple_view:
-    cat_simple = format_categorical_simple(cat_summary)
-    st.dataframe(cat_simple, use_container_width=True)
-    st.download_button(
-        "Scarica CSV (categoriche — vista semplice)",
-        cat_simple.to_csv(index=False).encode("utf-8"),
-        file_name="descriptive_categorical_simple.csv"
-    )
+if cat_summary.empty:
+    st.info("Nessuna variabile categorica selezionata.")
 else:
     st.dataframe(cat_summary, use_container_width=True)
     st.download_button(
-        "Scarica CSV (categoriche — dettagliata)",
+        "Scarica CSV (categoriche — distribuzioni complete)",
         cat_summary.to_csv(index=False).encode("utf-8"),
-        file_name="descriptive_categorical_detailed.csv"
+        file_name="descriptive_categorical_full.csv"
     )
 
 with st.expander("Come leggere la tabella categorica (breve guida)", expanded=False):
-    st.markdown(f"""
-- **N**: numero di osservazioni non mancanti. **% Missing**: percentuale di mancanti.
-- **Categorie**: numero di livelli distinti.
-- **Categoria più frequente**: il livello modale, con conteggio e percentuale.
+    st.markdown("""
+- Ogni variabile è riportata con **tutte le sue categorie** (più una riga *Missing* se necessario).
+- **Frequenza**: numero di osservazioni in ciascuna categoria.
+- **%**: percentuale sul totale della variabile.
 """)
+
 
 # -------------------------
 # Aggiunta al Results Summary
