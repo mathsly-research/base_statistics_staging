@@ -21,6 +21,7 @@ if st.session_state.df is None:
 
 # Ora possiamo importare i grafici
 from core.plots import observed_vs_theoretical_normal, qq_plot, box_violin
+import plotly.graph_objects as go  # per clonare le figure
 
 df: pd.DataFrame = st.session_state.df
 
@@ -38,21 +39,20 @@ with st.expander("🔎 Controllo rapido qualità", expanded=False):
 with st.expander("ℹ️ Come leggere i grafici (spiegazione semplice)", expanded=True):
     st.markdown("""
 **Istogramma + KDE + Normale teorica**  
-Confronta la distribuzione **osservata** (barre azzurre, curva blu) con una **normale teorica** (curva rossa tratteggiata) stimata dai dati.  
-- Se le curve blu e rossa sono simili → distribuzione vicina alla normale.  
-- Code molto lunghe o picchi asimmetrici indicano **asimmetria** o **outlier**.
+Confronta la distribuzione **osservata** (barre azzurre, curva blu) con una **normale teorica** (curva rossa tratteggiata).  
+- Curva blu ≈ curva rossa → distribuzione vicina alla normale.  
+- Code lunghe / picchi asimmetrici → **asimmetria** o **outlier**.
 
 **Q-Q plot**  
-Confronta i **quantili** dei dati con quelli della normale.  
-- I punti vicini alla retta → dati coerenti con la normale.  
-- Deviazioni sistematiche (S a coda, curvature) → **non normalità** (code pesanti, asimmetria).
+Confronta i **quantili** dei dati con quelli normali.  
+- Punti vicini alla retta → dati compatibili con la normale.  
+- Curvature a “S”/“C” → **non normalità** (code pesanti, asimmetria).
 
 **Box/Violin**  
-Riassume mediana, quartili e outlier; il violin mostra anche la **densità**.  
-- Box molto sbilanciato o whisker lunghi → **asimmetria**/**outlier**.  
-- Confronti rapidi tra gruppi (se si selezionano “Raggruppa per” in future estensioni).
+Mostrano mediana, quartili e outlier (e, nel violin, la **densità**).  
+- Box sbilanciato o whisker lunghi → **asimmetria**/**outlier**.
 """)
-    st.caption("Suggerimento: nei grafici Plotly può usare l’icona **View fullscreen** (in alto a destra) per ingrandire a schermo intero.")
+    st.caption("Suggerimento: i grafici Plotly hanno l’icona **View fullscreen** (in alto a destra).")
 
 # ---------------------------------
 # Selettori
@@ -71,11 +71,23 @@ with c_sel3:
 use_violin = st.toggle("Usa violin plot (invece del boxplot)", value=False)
 
 # ---------------------------------
-# Tre grafici affiancati
+# Utility: clone della figura (evita DuplicateElementId)
+# ---------------------------------
+def clone_fig(fig):
+    # go.Figure(fig) clona dati+layout generando un nuovo oggetto con id diverso
+    return go.Figure(fig)
+
+def tighten_margins(fig, height=360):
+    fig.update_layout(margin=dict(l=10, r=10, t=38, b=10), height=height)
+    return fig
+
+# ---------------------------------
+# Tre grafici affiancati, colonne più ampie
 # ---------------------------------
 st.subheader(f"Distribuzione di **{target}**")
 
-col1, col2, col3 = st.columns(3, gap="large")
+# Colonne con rapporto ampio: 2 : 1.6 : 1.6
+col1, col2, col3 = st.columns([2.0, 1.6, 1.6], gap="large")
 
 # 1) Istogramma + KDE + Normale teorica (densità)
 with col1:
@@ -86,18 +98,20 @@ with col1:
         title=f"Observed vs Theoretical Distribution for '{target}'",
         x_label=target
     )
-    st.plotly_chart(fig_hist, use_container_width=True)
+    tighten_margins(fig_hist, height=360)
+    st.plotly_chart(fig_hist, use_container_width=True, key="histogram_main")
     with st.expander("🔍 Ingrandisci", expanded=False):
-        st.plotly_chart(fig_hist, use_container_width=True)
+        st.plotly_chart(tighten_margins(clone_fig(fig_hist), height=560), use_container_width=True, key="histogram_zoom")
 
 # 2) Q-Q plot (robusto)
 with col2:
     st.markdown("**Q-Q plot**")
     try:
         fig_qq = qq_plot(df[target], title=f"Q-Q plot — {target}")
-        st.plotly_chart(fig_qq, use_container_width=True)
+        tighten_margins(fig_qq, height=360)
+        st.plotly_chart(fig_qq, use_container_width=True, key="qq_main")
         with st.expander("🔍 Ingrandisci", expanded=False):
-            st.plotly_chart(fig_qq, use_container_width=True)
+            st.plotly_chart(tighten_margins(clone_fig(fig_qq), height=560), use_container_width=True, key="qq_zoom")
     except Exception:
         st.info("Q-Q plot non disponibile (dati insufficienti o SciPy assente).")
 
@@ -105,9 +119,10 @@ with col2:
 with col3:
     st.markdown("**Box / Violin**")
     fig_box = box_violin(df[target], by=None, show_violin=use_violin, title=("Violin" if use_violin else "Box"))
-    st.plotly_chart(fig_box, use_container_width=True)
+    tighten_margins(fig_box, height=360)
+    st.plotly_chart(fig_box, use_container_width=True, key="box_main")
     with st.expander("🔍 Ingrandisci", expanded=False):
-        st.plotly_chart(fig_box, use_container_width=True)
+        st.plotly_chart(tighten_margins(clone_fig(fig_box), height=560), use_container_width=True, key="box_zoom")
 
 # ---------------------------------
 # Test di normalità (semplice, riassunto operativo)
@@ -181,10 +196,19 @@ else:
 # ---------------------------------
 st.divider()
 if st.button("➕ Aggiungi grafici e risultati al Results Summary"):
-    st.session_state.report_items.append({"type": "figure", "title": f"Observed vs Theoretical — {target}", "figure": fig_hist.to_dict()})
+    st.session_state.report_items.append({
+        "type": "figure", "title": f"Observed vs Theoretical — {target}",
+        "figure": clone_fig(fig_hist).to_dict()
+    })
     try:
-        st.session_state.report_items.append({"type": "figure", "title": f"Q-Q plot — {target}", "figure": fig_qq.to_dict()})
+        st.session_state.report_items.append({
+            "type": "figure", "title": f"Q-Q plot — {target}",
+            "figure": clone_fig(fig_qq).to_dict()
+        })
     except NameError:
         pass
-    st.session_state.report_items.append({"type": "figure", "title": ("Violin" if use_violin else "Box") + f" — {target}", "figure": fig_box.to_dict()})
+    st.session_state.report_items.append({
+        "type": "figure", "title": ("Violin" if use_violin else "Box") + f" — {target}",
+        "figure": clone_fig(fig_box).to_dict()
+    })
     st.success("Elementi aggiunti al Results Summary.")
