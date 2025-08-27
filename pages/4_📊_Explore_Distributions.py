@@ -34,19 +34,25 @@ with st.expander("🔎 Controllo rapido qualità", expanded=False):
     quality_alert(diag)
 
 # ---------------------------------
-# Spiegazione semplice
+# Spiegazione generale (come leggere i grafici)
 # ---------------------------------
-with st.expander("ℹ️ Come leggere i grafici", expanded=True):
+with st.expander("ℹ️ Come leggere i grafici (guida rapida)", expanded=True):
     st.markdown("""
 **Istogramma + KDE + Normale teorica**  
-Confronta la distribuzione **osservata** (barre azzurre, curva blu) con una **normale teorica** (curva rossa tratteggiata).  
+Confronta la distribuzione **osservata** (barre azzurre e curva blu, “KDE”) con una **normale teorica** (curva rossa tratteggiata) stimata dai dati.
+- **Allineamento KDE vs Normale** → dati simili a una normale.
+- **Code lunghe / picchi asimmetrici** → asimmetria o outlier.
+- **Asse Y = Density**: altezza delle barre/curve indica densità, non conteggio grezzo.
 
 **Q-Q plot**  
-Confronta i quantili dei dati con quelli della normale.  
+Confronta i **quantili** dei dati con quelli della normale.
+- **Punti sulla retta** → compatibile con normalità.
+- **Curvatura a S/C** → non normalità (code pesanti, asimmetria).
+- **Code verso l’alto/basso** → troppi valori estremi.
 
 **Box e Violin**  
-Box: mediana, quartili e outlier.  
-Violin: aggiunge la forma della distribuzione.  
+- **Box**: mediana (linea), quartili (box), outlier (punti). Robustezza alle code.  
+- **Violin**: forma/densità della distribuzione su tutta la scala (utile per vedere multimodalità).
 """)
     st.caption("Suggerimento: per ingrandire usare l’icona **View fullscreen** in alto a destra del grafico.")
 
@@ -72,7 +78,7 @@ def tighten_margins(fig, height=360):
     return fig
 
 # ---------------------------------
-# RIGA 1 — Istogramma e Q-Q plot
+# RIGA 1 — Istogramma e Q-Q plot (affiancati)
 # ---------------------------------
 st.subheader(f"Distribuzione di **{target}**")
 
@@ -88,6 +94,14 @@ with col1:
     )
     tighten_margins(fig_hist, height=380)
     st.plotly_chart(fig_hist, use_container_width=True, key="histogram")
+    # Guida specifica per il grafico
+    st.markdown("""
+**Come leggere (Istogramma + KDE + Normale)**  
+- **KDE (blu) ≈ Normale (rossa)** → distribuzione simile alla normale.  
+- **KDE spostata a destra/sinistra** → asimmetria (positiva/negativa).  
+- **Picchi multipli** → possibile **multimodalità** (più sottogruppi).  
+- **Barre molto lontane** → presenza di **outlier** o code pesanti.
+""")
 
 with col2:
     st.markdown("**Q-Q plot**")
@@ -95,6 +109,12 @@ with col2:
         fig_qq = qq_plot(df[target], title=f"Q-Q plot — {target}")
         tighten_margins(fig_qq, height=380)
         st.plotly_chart(fig_qq, use_container_width=True, key="qq")
+        st.markdown("""
+**Come leggere (Q-Q plot)**  
+- **Punti sulla retta** → compatibile con normalità.  
+- **Curva concava/convessa** → code troppo leggere/pesanti.  
+- **Deviazioni alle estremità** → outlier nelle code.
+""")
     except Exception:
         st.info("Q-Q plot non disponibile (dati insufficienti o SciPy assente).")
 
@@ -110,12 +130,24 @@ with colb1:
     fig_box = box_violin(df[target], by=None, show_violin=False, title="Box")
     tighten_margins(fig_box, height=360)
     st.plotly_chart(fig_box, use_container_width=True, key="box")
+    st.markdown("""
+**Come leggere (Box)**  
+- **Linea centrale** = **mediana**; **box** = **IQR (Q1–Q3)**.  
+- **Whisker lunghi** / molti **punti fuori** → **outlier** / code pesanti.  
+- **Mediana non centrale** → asimmetria.
+""")
 
 with colb2:
     st.markdown("**Violin plot**")
     fig_violin = box_violin(df[target], by=None, show_violin=True, title="Violin")
     tighten_margins(fig_violin, height=360)
     st.plotly_chart(fig_violin, use_container_width=True, key="violin")
+    st.markdown("""
+**Come leggere (Violin)**  
+- **Larghezza** = quanta **densità** c’è a quel valore.  
+- **Lobi multipli** → **multimodalità** (più sottogruppi).  
+- **Asimmetria evidente** → distribuzione sbilanciata.
+""")
 
 # ---------------------------------
 # Test di normalità (semplice)
