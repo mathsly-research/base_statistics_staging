@@ -9,7 +9,7 @@ from core.state import init_state
 # Init & dataset check
 # -----------------------------
 init_state()
-st.title("🧹 Step 8 — Gestione dati mancanti e filtri")
+st.title("🧹 Step 1 — Gestione dati mancanti e filtri")
 
 # Manteniamo sempre copia originale
 if st.session_state.df_original is None and st.session_state.df is not None:
