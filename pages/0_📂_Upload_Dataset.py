@@ -51,36 +51,38 @@ else:
     st.info("Carica un file per iniziare.")
 
 # ---------------------------------
-# Navigazione agli step successivi (stile card)
+# Navigazione agli step successivi (stile dashboard colorata)
 # ---------------------------------
 PAGES = [
-    ("pages/1_🧹_Data_Cleaning.py",        "🧹 Cleaning",         "Gestione missing values e filtri"),
-    ("pages/2_📈_Descriptive_Statistics.py","📈 Descrittive",      "Statistiche di base e riepilogo variabili"),
-    ("pages/3_📊_Explore_Distributions.py", "📊 Distribuzioni",    "Istogrammi, boxplot e violino per esplorare i dati"),
-    ("pages/4_🔍_Assumption_Checks.py",     "🔍 Assunzioni",       "Verifica normalità, omoscedasticità e indipendenza"),
-    ("pages/5_🧪_Statistical_Tests.py",     "🧪 Test statistici",  "Confronto gruppi, test parametrici e non parametrici"),
-    ("pages/6_🔗_Correlation.py",           "🔗 Correlazioni",     "Relazioni tra variabili, scatterplot e heatmap"),
+    ("pages/1_🧹_Data_Cleaning.py",        "🧹", "Cleaning",         "Gestione missing values e filtri", "#e6f7ff"),
+    ("pages/2_📈_Descriptive_Statistics.py","📈", "Descrittive",      "Statistiche di base e riepilogo variabili", "#fff5e6"),
+    ("pages/3_📊_Explore_Distributions.py", "📊", "Distribuzioni",    "Istogrammi, boxplot e violino", "#f9e6ff"),
+    ("pages/4_🔍_Assumption_Checks.py",     "🔍", "Assunzioni",       "Verifica normalità e omoscedasticità", "#e6ffe6"),
+    ("pages/5_🧪_Statistical_Tests.py",     "🧪", "Test statistici",  "Confronti parametrici e non parametrici", "#fff0f0"),
+    ("pages/6_🔗_Correlation.py",           "🔗", "Correlazioni",     "Relazioni tra variabili e heatmap", "#f0f5ff"),
     # Futuro: Results Summary
-    # ("pages/7_🧾_Results_Summary.py",     "🧾 Report finale",   "Sintesi dei risultati ed esportazione")
+    # ("pages/7_🧾_Results_Summary.py",     "🧾", "Report finale",   "Sintesi dei risultati ed esportazione", "#f5f5f5")
 ]
 
 st.divider()
 st.subheader("🚀 Navigazione rapida agli step")
 
-cols = st.columns(2)  # due colonne = layout più ampio e leggibile
+cols = st.columns(2)  # due colonne, stile dashboard
 i = 0
-for page_path, title, desc in PAGES:
+for page_path, icon, title, desc, color in PAGES:
     if Path(page_path).exists():
         with cols[i % 2]:
             st.markdown(
                 f"""
-                <div style="border:2px solid #ddd; border-radius:15px; padding:15px; margin-bottom:15px; 
-                            box-shadow:2px 2px 10px rgba(0,0,0,0.05); background-color:#f9f9f9;">
-                    <h4 style="margin-bottom:5px;">{title}</h4>
-                    <p style="margin-top:0; color:gray; font-size:0.9em;">{desc}</p>
+                <div style="border-radius:15px; padding:20px; margin-bottom:20px; 
+                            background-color:{color}; text-align:center; 
+                            box-shadow:2px 2px 10px rgba(0,0,0,0.08);">
+                    <div style="font-size:40px; margin-bottom:10px;">{icon}</div>
+                    <h3 style="margin-bottom:5px; color:#333;">{title}</h3>
+                    <p style="margin-top:0; margin-bottom:15px; color:#555; font-size:0.9em;">{desc}</p>
                     <a href='/{page_path}' target='_self' style='text-decoration:none;'>
-                        <button style="background-color:#4CAF50; color:white; padding:8px 16px; 
-                                       border:none; border-radius:10px; cursor:pointer;">
+                        <button style="background-color:#4CAF50; color:white; padding:10px 20px; 
+                                       border:none; border-radius:10px; cursor:pointer; font-size:0.9em;">
                             Vai →
                         </button>
                     </a>
@@ -89,4 +91,5 @@ for page_path, title, desc in PAGES:
                 unsafe_allow_html=True
             )
         i += 1
+
 
