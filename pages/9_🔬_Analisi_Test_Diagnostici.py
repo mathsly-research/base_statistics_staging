@@ -9,8 +9,10 @@ from core.state import init_state
 try:
     from sklearn.metrics import (
         roc_curve, auc, confusion_matrix,
-        precision_recall_curve, average_precision_score
+        precision_recall_curve, average_precision_score,
+        brier_score_loss
     )
+    from sklearn.linear_model import LogisticRegression
     _HAS_SKLEARN = True
 except Exception:
     _HAS_SKLEARN = False
@@ -27,7 +29,6 @@ import plotly.graph_objects as go
 # Utility comuni
 # ===========================================================
 def _use_active_df() -> pd.DataFrame:
-    """Usa il dataset working se esiste, altrimenti l'originale df."""
     if "df_working" in st.session_state and st.session_state.df_working is not None:
         return st.session_state.df_working.copy()
     return st.session_state.df.copy()
@@ -37,7 +38,6 @@ def _is_binary(s: pd.Series) -> bool:
     return len(vals) == 2
 
 def _confusion_from_binary(y_true: np.ndarray, y_pred: np.ndarray):
-    """Restituisce TP, FP, TN, FN (positiva=1)."""
     y_true = np.asarray(y_true).astype(int)
     y_pred = np.asarray(y_pred).astype(int)
     TP = int(((y_true == 1) & (y_pred == 1)).sum())
@@ -50,7 +50,6 @@ def _safe_div(a, b):
     return float(a) / float(b) if b not in (0, 0.0) else np.nan
 
 def _binom_ci(x, n, alpha=0.05):
-    """IC 95% per proporzioni: Clopper–Pearson (SciPy) o Wilson."""
     if n is None or n == 0:
         return (np.nan, np.nan)
     p = x / n
@@ -65,46 +64,32 @@ def _binom_ci(x, n, alpha=0.05):
     return (float(center - halfw), float(center + halfw))
 
 def _lr_ci(tp, fp, tn, fn, alpha=0.05):
-    """
-    IC 95% per LR+ e LR− con metodo log-trasformato (Simel et al.).
-    log(LR+) ± z * SE_logLR+,  SE_logLR+ = sqrt(1/TP - 1/(TP+FN) + 1/FP - 1/(FP+TN))
-    log(LR−) ± z * SE_logLR−,  SE_logLR− = sqrt(1/FN - 1/(TP+FN) + 1/TN - 1/(FP+TN))
-    Gestisce zero mediante NaN.
-    """
     z = 1.959963984540054
-    # Sensibilità e specificità
     sens = _safe_div(tp, tp + fn)
     spec = _safe_div(tn, tn + fp)
     lr_plus = _safe_div(sens, 1 - spec) if np.isfinite(sens) and np.isfinite(spec) and spec != 1 else np.nan
     lr_minus = _safe_div(1 - sens, spec) if np.isfinite(sens) and np.isfinite(spec) and spec != 0 else np.nan
 
-    # SE per log LR
-    def _safe_sum_terms(terms):
-        if any(t is None for t in terms):
-            return np.nan
+    def _sum(terms):
         return np.sum(terms)
 
     try:
-        se_log_lr_plus = np.sqrt(
-            _safe_sum_terms([
-                _safe_div(1, tp) if tp>0 else np.nan,
-                -_safe_div(1, (tp + fn)) if (tp+fn)>0 else np.nan,
-                _safe_div(1, fp) if fp>0 else np.nan,
-                -_safe_div(1, (fp + tn)) if (fp+tn)>0 else np.nan
-            ])
-        )
+        se_log_lr_plus = np.sqrt(_sum([
+            _safe_div(1, tp) if tp>0 else np.nan,
+            -_safe_div(1, (tp + fn)) if (tp+fn)>0 else np.nan,
+            _safe_div(1, fp) if fp>0 else np.nan,
+            -_safe_div(1, (fp + tn)) if (fp+tn)>0 else np.nan
+        ]))
     except Exception:
         se_log_lr_plus = np.nan
 
     try:
-        se_log_lr_minus = np.sqrt(
-            _safe_sum_terms([
-                _safe_div(1, fn) if fn>0 else np.nan,
-                -_safe_div(1, (tp + fn)) if (tp+fn)>0 else np.nan,
-                _safe_div(1, tn) if tn>0 else np.nan,
-                -_safe_div(1, (fp + tn)) if (fp+tn)>0 else np.nan
-            ])
-        )
+        se_log_lr_minus = np.sqrt(_sum([
+            _safe_div(1, fn) if fn>0 else np.nan,
+            -_safe_div(1, (tp + fn)) if (tp+fn)>0 else np.nan,
+            _safe_div(1, tn) if tn>0 else np.nan,
+            -_safe_div(1, (fp + tn)) if (fp+tn)>0 else np.nan
+        ]))
     except Exception:
         se_log_lr_minus = np.nan
 
@@ -120,7 +105,6 @@ def _lr_ci(tp, fp, tn, fn, alpha=0.05):
     return (lr_p, lo_p, hi_p, lr_m, lo_m, hi_m)
 
 def _metric_table(TP, FP, TN, FN, alpha=0.05):
-    """Tabella metrica con IC per proporzioni + IC per LR (log-transform)."""
     sens = _safe_div(TP, TP + FN)
     spec = _safe_div(TN, TN + FP)
     ppv  = _safe_div(TP, TP + FP)
@@ -166,14 +150,12 @@ def _pr_plot(y_true, y_score):
     return fig, ap
 
 def _optimal_threshold(y_true, y_score):
-    """Soglia che massimizza Youden J sulla ROC."""
     fpr, tpr, thr = roc_curve(y_true, y_score)
     j = tpr - fpr
     k = int(np.argmax(j))
     return float(thr[k]), float(tpr[k]), float(1 - fpr[k])
 
 def _bayes_post_test(pre_prob, lr):
-    """Dato pre_prob (0-1) e un LR restituisce la post_prob."""
     if pre_prob is None or not np.isfinite(pre_prob):
         return np.nan
     pre_prob = float(np.clip(pre_prob, 1e-12, 1-1e-12))
@@ -182,22 +164,14 @@ def _bayes_post_test(pre_prob, lr):
     return float(post_odds / (1 + post_odds)) if np.isfinite(post_odds) else np.nan
 
 def _dca_compute(y_true, scores, thresholds):
-    """
-    Decision Curve Analysis per un set di soglie p_t (0-1).
-    Net Benefit (NB) del Test: NB = TP/N - FP/N * (p_t / (1 - p_t)).
-    'Tratta tutti': NB_all = prevalenza - (1 - prevalenza) * (p_t / (1 - p_t)).
-    'Tratta nessuno': NB_none = 0.
-    scores: punteggio continuo (maggiore = più 'positivo').
-    """
     y_true = np.asarray(y_true).astype(int)
     N = len(y_true)
     prev = y_true.mean() if N>0 else np.nan
     rows = []
     for pt in thresholds:
-        if not (0 < pt < 1):  # evita 0 e 1
+        if not (0 < pt < 1):
             continue
         thr = np.quantile(scores, 1-pt) if np.isfinite(np.nanmean(scores)) else None
-        # Classifica in base alla soglia sullo score (percentile 1-pt per coerenza)
         y_pred = (scores >= thr).astype(int) if thr is not None else np.zeros_like(y_true)
         TP, FP, TN, FN = _confusion_from_binary(y_true, y_pred)
         TPn = TP / N if N>0 else np.nan
@@ -208,6 +182,63 @@ def _dca_compute(y_true, scores, thresholds):
         nb_none = 0.0
         rows.append({"threshold": float(pt), "NB_test": float(nb_test), "NB_all": float(nb_all), "NB_none": float(nb_none)})
     return pd.DataFrame(rows)
+
+# ---------- Calibrazione ----------
+def _clip_probs(p, eps=1e-9):
+    return np.clip(np.asarray(p, dtype=float), eps, 1 - eps)
+
+def _compute_calibration(y_true, prob, n_bins=10):
+    """
+    Calcola: reliability table (bin decilici), Brier, calibration-in-the-large (intercetta) e slope.
+    Stima intercetta e slope con logistic regression di y ~ 1 + logit(prob).
+    """
+    y = np.asarray(y_true).astype(int)
+    p = _clip_probs(prob)
+
+    # Brier score
+    try:
+        brier = float(brier_score_loss(y, p))
+    except Exception:
+        brier = float(np.mean((y - p)**2))
+
+    # Logit transform
+    logit_p = np.log(p / (1 - p))
+
+    # Regressione logistica per intercetta e slope
+    calib_intercept, calib_slope = np.nan, np.nan
+    if _HAS_SKLEARN and np.isfinite(logit_p).all():
+        try:
+            X = np.column_stack([np.ones_like(logit_p), logit_p])
+            # Fit con penality minima usando solver liblinear; disabilitiamo la regolarizzazione con grandi C
+            lr = LogisticRegression(fit_intercept=False, solver="liblinear", C=1e6, max_iter=1000)
+            lr.fit(X, y)
+            calib_intercept = float(lr.coef_[0][0])
+            calib_slope     = float(lr.coef_[0][1])
+        except Exception:
+            pass
+
+    # Reliability table per decili
+    try:
+        bins = pd.qcut(p, q=n_bins, duplicates="drop")
+        df_cal = pd.DataFrame({"y": y, "p": p, "bin": bins})
+        grp = df_cal.groupby("bin", observed=True).agg(
+            p_mean=("p", "mean"),
+            y_rate=("y", "mean"),
+            n=("y", "size")
+        ).reset_index(drop=True).sort_values("p_mean")
+    except Exception:
+        # Fallback: taglio uniforme
+        edges = np.linspace(0, 1, n_bins+1)
+        bin_idx = np.digitize(p, edges) - 1
+        bin_idx = np.clip(bin_idx, 0, n_bins-1)
+        df_cal = pd.DataFrame({"y": y, "p": p, "bin": bin_idx})
+        grp = df_cal.groupby("bin", observed=True).agg(
+            p_mean=("p", "mean"),
+            y_rate=("y", "mean"),
+            n=("y", "size")
+        ).reset_index(drop=True).sort_values("p_mean")
+
+    return grp, brier, calib_intercept, calib_slope
 
 # ===========================================================
 # Pagina
@@ -304,8 +335,7 @@ with st.spinner("Stimo sensibilità, specificità, PPV, NPV, LR (con IC) e altre
 st.dataframe(metrics_df, use_container_width=True)
 st.caption(
     "Interpretazione rapida: **Sensibilità** = quota di malati che risultano positivi; **Specificità** = quota di sani che risultano negativi. "
-    "**PPV/NPV** dipendono dalla **prevalenza**. **LR+** (con IC) indica quanto un **test positivo** aumenti l’evidenza di malattia; "
-    "**LR−** (con IC) indica quanto un **test negativo** la riduca."
+    "**PPV/NPV** dipendono dalla **prevalenza**. **LR+** e **LR−** (con IC) indicano quanto un test positivo/negativo cambia l’evidenza."
 )
 
 # =========================
@@ -331,7 +361,7 @@ if _HAS_SKLEARN:
             fig_roc, auc_val = _roc_plot(y_valid.values, score_for_plots)
             st.plotly_chart(fig_roc, use_container_width=True)
         st.caption(
-            "Curva **ROC**: mostra il compromesso tra **Sensibilità (TPR)** e **1−Specificità (FPR)** variando la soglia. "
+            "Curva **ROC**: compromesso tra **Sensibilità (TPR)** e **1−Specificità (FPR)** variando la soglia. "
             "Un’**AUC** più alta indica migliore capacità discriminativa (0.5 = casuale; >0.8 buona)."
         )
 
@@ -341,7 +371,7 @@ if _HAS_SKLEARN:
             st.plotly_chart(fig_pr, use_container_width=True)
         st.caption(
             "Curva **Precision–Recall**: **Precision (PPV)** vs **Recall (Sensibilità)**. "
-            "È spesso più informativa della ROC quando la classe positiva è rara. **AP** riassume l’area sotto questa curva."
+            "Più informativa della ROC quando la classe positiva è rara. **AP** riassume l’area sotto questa curva."
         )
 else:
     st.info("Per le curve ROC e Precision–Recall è necessario `scikit-learn`.")
@@ -354,7 +384,6 @@ with st.expander("Imposta la probabilità pre-test", expanded=False):
     pre_default = float(prev) if np.isfinite(prev) else 0.2
     pre_test = st.slider("Probabilità pre-test (stima clinica o prevalenza attesa)", 0.0, 1.0, pre_default, step=0.01)
 
-# LR da tabella
 try:
     lr_plus  = float(metrics_df.loc[metrics_df["Metrica"]=="LR+","Valore"].values[0])
     lr_minus = float(metrics_df.loc[metrics_df["Metrica"]=="LR−","Valore"].values[0])
@@ -374,8 +403,8 @@ st.dataframe(post_tbl, use_container_width=True)
 st.latex(r"\text{odds}_{post} = \text{odds}_{pre} \times LR")
 st.latex(r"p_{post} = \frac{\text{odds}_{post}}{1+\text{odds}_{post}}")
 st.caption(
-    "Guida: imposti una **probabilità pre-test**. Con un **test positivo**, usa **LR+** per aggiornare la probabilità; "
-    "con un **test negativo**, usa **LR−**. Esempio: pre-test 0.30 ⇒ odds=0.43; con LR+=5 ⇒ odds_post=2.15 ⇒ p_post≈0.68."
+    "Guida: imposti una **probabilità pre-test**. Con un **test positivo**, usa **LR+**; con un **test negativo**, usa **LR−**. "
+    "Esempio: pre-test 0.30 ⇒ odds=0.43; con LR+=5 ⇒ odds_post=2.15 ⇒ p_post≈0.68."
 )
 
 # =========================
@@ -384,7 +413,6 @@ st.caption(
 st.markdown("## Decision Curve Analysis (DCA)")
 if _HAS_SKLEARN and score_for_plots is not None and len(score_for_plots) == len(y_valid):
     with st.spinner("Calcolo Net Benefit su un range di soglie…"):
-        # Soglie uniformi in (0,1), escludendo estremi
         thresholds = np.linspace(0.01, 0.99, 99)
         dca_df = _dca_compute(y_valid.values, score_for_plots, thresholds)
 
@@ -393,20 +421,91 @@ if _HAS_SKLEARN and score_for_plots is not None and len(score_for_plots) == len(
         fig_dca.add_trace(go.Scatter(x=dca_df["threshold"], y=dca_df["NB_test"], mode="lines", name="Test"))
         fig_dca.add_trace(go.Scatter(x=dca_df["threshold"], y=dca_df["NB_all"],  mode="lines", name="Tratta tutti"))
         fig_dca.add_trace(go.Scatter(x=dca_df["threshold"], y=dca_df["NB_none"], mode="lines", name="Tratta nessuno"))
-        fig_dca.update_layout(
-            title="Decision Curve Analysis — Net Benefit",
-            xaxis_title="Soglia di decisione (p_t)",
-            yaxis_title="Net Benefit"
-        )
+        fig_dca.update_layout(title="Decision Curve Analysis — Net Benefit",
+                              xaxis_title="Soglia di decisione (p_t)",
+                              yaxis_title="Net Benefit")
         st.plotly_chart(fig_dca, use_container_width=True)
 
     st.caption(
-        "L’asse **x** è la **soglia di decisione** \(p_t\), cioè la probabilità a partire dalla quale si decide di trattare. "
-        "Il **Net Benefit (NB)** confronta il test con due strategie estreme: **Tratta tutti** e **Tratta nessuno**. "
-        "Dove la curva del **Test** sta **sopra** le altre, l’uso del test **porta beneficio clinico** rispetto alle alternative."
+        "L’asse **x** è la **soglia di decisione** \(p_t\). Il **Net Benefit** confronta il test con **Tratta tutti** e **Tratta nessuno**. "
+        "Dove la curva del **Test** sta **sopra** le altre, l’uso del test comporta **beneficio clinico**."
     )
 else:
-    st.info("Per la DCA è necessario uno **score continuo** (o prob.) e `scikit-learn`.")
+    st.info("Per la DCA è necessario uno **score continuo** (o probabilità) e `scikit-learn`.")
+
+# =========================
+#           Calibrazione
+# =========================
+st.markdown("## Calibrazione")
+if _HAS_SKLEARN and score_for_plots is not None:
+    # Opzione: usare una colonna di probabilità già presente nel dataset
+    numeric_cols = [c for c in df.columns if c not in [outcome] and pd.api.types.is_numeric_dtype(df[c])]
+    prob_col = st.selectbox("Colonna con probabilità pre-calcolate (opzionale):", options=["— Nessuna —"] + numeric_cols)
+    use_prob = None
+
+    if prob_col != "— Nessuna —":
+        # Usa probabilità fornite (filtrate su valid_mask)
+        rawp = df.loc[valid_mask, prob_col].astype(float).values
+        use_prob = _clip_probs(rawp)
+        st.info("Uso le **probabilità fornite** dalla colonna selezionata.")
+    else:
+        # Platt scaling sullo score (stima su stesso set — attenzioni di overfitting)
+        with st.spinner("Stimo probabilità dallo score (Platt scaling)…"):
+            try:
+                Xs = score_for_plots.reshape(-1, 1).astype(float)
+                lr_platt = LogisticRegression(solver="liblinear", max_iter=1000)
+                lr_platt.fit(Xs, y_valid.values)
+                use_prob = lr_platt.predict_proba(Xs)[:, 1]
+                st.caption("Nota: le probabilità sono stimate sullo **stesso dataset** (possibile **overfitting**).")
+            except Exception:
+                use_prob = None
+                st.warning("Impossibile stimare probabilità dallo score.")
+
+    if use_prob is not None:
+        with st.spinner("Calcolo reliability diagram, Brier score e parametri di calibrazione…"):
+            cal_tbl, brier, c_int, c_slope = _compute_calibration(y_valid.values, use_prob, n_bins=10)
+
+        # Grafici affiancati: curva calibrazione + istogramma probabilità
+        g1, g2 = st.columns(2)
+        with g1:
+            fig_cal = go.Figure()
+            fig_cal.add_trace(go.Scatter(x=cal_tbl["p_mean"], y=cal_tbl["y_rate"],
+                                         mode="lines+markers", name="Osservato vs Predetto"))
+            fig_cal.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="lines", name="Perfetta calibrazione", line=dict(dash="dash")))
+            fig_cal.update_layout(title="Reliability diagram (per decili)",
+                                  xaxis_title="Probabilità predetta media (per bin)",
+                                  yaxis_title="Tasso osservato di esito (per bin)")
+            st.plotly_chart(fig_cal, use_container_width=True)
+            st.caption(
+                "Se i punti seguono la linea diagonale, le **probabilità predette** corrispondono bene ai **tassi osservati**. "
+                "Curve **sopra** la diagonale indicano **sottostima**; **sotto** indicano **sovrastima** del rischio."
+            )
+        with g2:
+            try:
+                fig_hist = go.Figure()
+                fig_hist.add_trace(go.Histogram(x=use_prob, nbinsx=20))
+                fig_hist.update_layout(title="Distribuzione delle probabilità predette", xaxis_title="Probabilità", yaxis_title="Frequenza")
+                st.plotly_chart(fig_hist, use_container_width=True)
+            except Exception:
+                pass
+            st.caption("Distribuzione delle **probabilità predette**: utile per capire se il modello usa l’intero range (0–1) o concentra le previsioni.")
+
+        # Indicatori numerici
+        st.markdown("### Indicatori di calibrazione")
+        st.write(pd.DataFrame({
+            "Brier score": [round(brier, 4)],
+            "Calibration intercept": [round(c_int, 4) if np.isfinite(c_int) else np.nan],
+            "Calibration slope": [round(c_slope, 4) if np.isfinite(c_slope) else np.nan]
+        }))
+        st.caption(
+            "**Brier** (0 migliore): errore quadratico medio tra probabilità e outcome binario. "
+            "**Intercept ≈ 0** indica calibrazione globale corretta; **Slope ≈ 1** indica corretta dispersione. "
+            "Slope < 1 suggerisce **overfitting** (probabilità troppo estreme), > 1 **underfitting**."
+        )
+    else:
+        st.info("Nessuna probabilità disponibile o stimabile: la calibrazione richiede **probabilità**, non solo uno score binario.")
+else:
+    st.info("Per la calibrazione servono `scikit-learn` e uno **score/probabilità**.")
 
 # =========================
 #   Analisi per sottogruppi
@@ -436,8 +535,7 @@ with st.expander("Imposta stratificazione per sottogruppi", expanded=False):
             with st.spinner("Preparo livelli di stratificazione…"):
                 s_used = s.astype(str)
 
-        levels_s = [lv for lv in pd.Series(s_used).dropna().unique().tolist()]
-        levels_s = sorted(levels_s, key=lambda v: v)
+        levels_s = sorted(pd.Series(s_used).dropna().unique().tolist(), key=lambda v: v)
 
         rows = []
         with st.spinner("Calcolo metriche per ciascun sottogruppo…"):
@@ -471,8 +569,8 @@ with st.expander("Imposta stratificazione per sottogruppi", expanded=False):
         st.markdown("### Risultati per sottogruppi")
         st.dataframe(subgroup_table.round(4), use_container_width=True)
         st.caption(
-            "Attenzione: differenze tra sottogruppi possono dipendere da **campioni piccoli**, **soglie non ottimali** o "
-            "**prevalenza diversa**. Usare cautela nell’interpretazione e, se possibile, validare in un set indipendente."
+            "Differenze tra sottogruppi possono dipendere da **campioni piccoli**, **soglie non ottimali** o **prevalenza diversa**. "
+            "Usare cautela e, se possibile, validare su dati indipendenti."
         )
 
 # =========================
@@ -501,41 +599,63 @@ if st.button("➕ Aggiungi analisi diagnostica al Results Summary"):
                 "average_precision": float(ap_val) if ap_val is not None and np.isfinite(ap_val) else None,
             }
         }
+        # DCA
         if _HAS_SKLEARN and score_for_plots is not None and len(score_for_plots)==len(y_valid):
             item["content"]["dca"] = _dca_compute(y_valid.values, score_for_plots, np.linspace(0.01,0.99,99)).round(6).to_dict(orient="records")
+        # Calibrazione (se disponibile)
+        if _HAS_SKLEARN and score_for_plots is not None:
+            try:
+                # Ricostruisco probabilità usate (stesso percorso della sezione calibrazione)
+                if 'prob_col' in locals() and prob_col != "— Nessuna —":
+                    rawp = df.loc[valid_mask, prob_col].astype(float).values
+                    use_prob = _clip_probs(rawp)
+                else:
+                    Xs = score_for_plots.reshape(-1, 1).astype(float)
+                    lr_platt = LogisticRegression(solver="liblinear", max_iter=1000)
+                    lr_platt.fit(Xs, y_valid.values)
+                    use_prob = lr_platt.predict_proba(Xs)[:, 1]
+                cal_tbl, brier, c_int, c_slope = _compute_calibration(y_valid.values, use_prob, n_bins=10)
+                item["content"]["calibration"] = {
+                    "brier": float(brier),
+                    "intercept": float(c_int) if np.isfinite(c_int) else None,
+                    "slope": float(c_slope) if np.isfinite(c_slope) else None,
+                    "reliability_table": cal_tbl.round(6).to_dict(orient="records")
+                }
+            except Exception:
+                pass
+
         if 'subgroup_table' in locals() and isinstance(subgroup_table, pd.DataFrame) and not subgroup_table.empty:
             item["content"]["subgroups"] = subgroup_table.round(6).to_dict(orient="records")
+
         st.session_state.report_items.append(item)
     st.success("Analisi diagnostica aggiunta al Results Summary.")
 
 # =========================
-#  Sezione didattica finale
+#  Spiegazione finale
 # =========================
 with st.expander("ℹ️ Spiegazione completa (utente non esperto)", expanded=False):
     st.markdown("""
-**Che cosa misuro?**  
-- **Sensibilità**: tra i malati, quanti risultano positivi.  
-- **Specificità**: tra i sani, quanti risultano negativi.  
-- **PPV/NPV**: probabilità che un positivo/negativo al test sia davvero malato/sano; dipendono dalla **prevalenza**.  
-- **LR+ / LR− (con IC 95%)**: quanto cambia l’evidenza a favore/contro la malattia; si basano su sensibilità e specificità.  
-- **AUC**: capacità del test (o score) di separare malati da sani su tutte le soglie.  
-- **AP (Average Precision)**: media della precisione lungo i valori di recall, utile con classi sbilanciate.  
-- **DCA (Decision Curve Analysis)**: valuta l’**utilità clinica** del test confrontando il **Net Benefit** del test con strategie
-  di riferimento (**Tratta tutti** e **Tratta nessuno**) su varie soglie di decisione \(p_t\).
+**Cosa misuro?**  
+- **Sensibilità/Specificità**: performance del test su malati/sani.  
+- **PPV/NPV**: dipendono dalla **prevalenza**.  
+- **LR+ / LR− (con IC)**: aggiornano l’evidenza diagnostica (Bayes).  
+- **AUC / AP**: discriminazione complessiva; **AP** utile con classi sbilanciate.  
+- **DCA**: utilità clinica su diverse **soglie di decisione**.  
+- **Calibrazione**: coerenza tra **probabilità predette** e **tassi osservati**.
 
-**Scelta della soglia (test continui)**  
-- Spesso si massimizza **Youden J = Sens + Spec − 1**, ma in screening si tende a privilegiare la **sensibilità**,
-  mentre nella conferma diagnostica la **specificità**.
+**Calibrazione (come leggerla)**  
+- **Reliability diagram**: punti sulla diagonale ⇒ buona calibrazione; sopra ⇒ **sottostima**; sotto ⇒ **sovrastima**.  
+- **Brier score** (0 migliore): errore quadratico medio delle probabilità.  
+- **Intercept ≈ 0** e **Slope ≈ 1** sono ideali; **Slope < 1** spesso indica **overfitting**.
 
-**Da pre-test a post-test (Bayes)**  
+**Bayes (probabilità post-test)**  
 """)
     st.latex(r"\text{odds}_{post} = \text{odds}_{pre} \times LR")
     st.latex(r"p_{post} = \frac{\text{odds}_{post}}{1+\text{odds}_{post}}")
     st.markdown("""
-**Esempio**: pre-test 30% ⇒ odds=0.30/0.70≈0.43. Con **LR+=5** ⇒ odds_post=2.15 ⇒ p_post≈0.68.
+Esempio: pre-test 30% ⇒ odds=0.30/0.70≈0.43. Con **LR+=5** ⇒ odds_post=2.15 ⇒ p_post≈0.68.
 
 **Avvertenze**  
-- Con **campioni piccoli** gli IC sono ampi; per LR gli IC sono calcolati su scala logaritmica.  
-- **PPV/NPV** cambiano con la prevalenza della popolazione in cui applico il test.  
-- Nella **DCA**, il beneficio dipende dalle preferenze cliniche espresse da \(p_t\): scegliere il range di soglie coerente col contesto.
+- La calibrazione qui è stimata **sugli stessi dati** se non si forniscono probabilità esterne: ciò può **ottimisticamente** valutare l’aderenza.  
+- Per una stima robusta, usare **probabilità da validazione esterna** o procedere con **cross-validation/bootstrapping**.
 """)
