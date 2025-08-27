@@ -11,3 +11,4 @@ scikit-posthocs
 pyarrow
 kaleido>=0.2.1
 scikit-learn
+lifelines
