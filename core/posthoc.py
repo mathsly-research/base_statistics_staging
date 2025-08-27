@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import pandas as pd
-import numpy as np
 
 try:
     import statsmodels.stats.multicomp as mc
@@ -8,9 +7,9 @@ except Exception:
     mc = None
 
 try:
-    import scikit_posthocs as sp posthocs
+    import scikit_posthocs as sp
 except Exception:
-    posthocs = None
+    sp = None
 
 
 def tukey_hsd(data: pd.Series, group: pd.Series):
@@ -23,15 +22,19 @@ def tukey_hsd(data: pd.Series, group: pd.Series):
     df = pd.DataFrame({"y": data, "g": group}).dropna()
     comp = mc.MultiComparison(df["y"], df["g"])
     res = comp.tukeyhsd()
-    return pd.DataFrame(data=res._results_table.data[1:], columns=res._results_table.data[0])
+    return pd.DataFrame(
+        data=res._results_table.data[1:],
+        columns=res._results_table.data[0]
+    )
 
 
 def dunn_test(data: pd.Series, group: pd.Series, p_adjust="bonferroni"):
     """
     Dunn post-hoc dopo Kruskal–Wallis.
+    Ritorna una matrice di p-values corretti.
     """
-    if posthocs is None:
+    if sp is None:
         return None
     df = pd.DataFrame({"y": data, "g": group}).dropna()
-    res = posthocs.posthoc_dunn(df, val_col="y", group_col="g", p_adjust=p_adjust)
+    res = sp.posthoc_dunn(df, val_col="y", group_col="g", p_adjust=p_adjust)
     return res
