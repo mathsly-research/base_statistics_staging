@@ -134,7 +134,7 @@ if not X_sel:
     st.stop()
 
 # -----------------------------
-# Regressione LINEARE (OLS, robust SE)
+# Regressione LINEARE (OLS, SE robusti)
 # -----------------------------
 if model_type == "Lineare (OLS)":
     # y deve essere numerica
@@ -177,18 +177,22 @@ if model_type == "Lineare (OLS)":
 
     # Diagnostica
     st.subheader("Diagnostica modello")
-    resid = model.resid.values
-    fitted = model.fittedvalues.values
 
     # Residui vs Fitted
+    resid = model.resid.values
+    fitted = model.fittedvalues.values
     fig1 = px.scatter(x=fitted, y=resid, labels={"x": "Fitted", "y": "Residui"}, title="Residui vs Fitted")
     fig1.add_hline(y=0, line_dash="dash")
     st.plotly_chart(fig1, use_container_width=True)
+    st.caption("**Come leggere — Residui vs Fitted:** i punti dovrebbero distribuirsi casualmente attorno a 0 senza pattern. "
+               "Strutture a ventaglio o curve indicano possibili violazioni (non linearità/eteroscedasticità).")
 
     # Q-Q plot (se SciPy presente)
     figqq = _qq_plot(resid)
     if figqq is not None:
         st.plotly_chart(figqq, use_container_width=True)
+        st.caption("**Come leggere — Q-Q plot dei residui:** i punti dovrebbero allinearsi alla diagonale. "
+                   "Deviazioni sistematiche indicano non normalità dei residui.")
 
     # Shapiro-Wilk residui (se SciPy)
     if _HAS_SCIPY and len(resid) >= 3:
@@ -211,7 +215,8 @@ if model_type == "Lineare (OLS)":
     st.markdown("**Multicollinearità (VIF)**")
     vif_df = _compute_vif(X)
     st.dataframe(vif_df.round(3), use_container_width=True)
-    st.caption("Interpretazione VIF: ≈1 nessuna collinearità; >5 moderata; >10 problematica.")
+    st.caption("**Come leggere — VIF:** ≈1 nessuna collinearità; >5 moderata; >10 problematica. "
+               "Collinearità elevata rende instabili i coefficienti.")
 
     # ➕ Salva nel Results Summary
     if st.button("➕ Aggiungi risultati OLS al Results Summary"):
@@ -232,19 +237,19 @@ if model_type == "Lineare (OLS)":
         })
         st.success("Modello OLS aggiunto al Results Summary.")
 
-    # Guida interpretativa
+    # Guida interpretativa sintetica (riepilogo)
     with st.expander("ℹ️ Come leggere i risultati (OLS)", expanded=False):
         st.markdown("""
-- **R² / R² adj.**: quota di varianza dell’outcome spiegata dai predittori (R² adj. penalizza modelli troppo complessi).  
-- **Coefficienti**: effetto marginale medio (aggiustato); IC95% e p-value quantificano l’incertezza.  
-- **Residui vs Fitted**: pattern non casuali → possibili violazioni (non linearità, eteroscedasticità).  
-- **Q-Q residui**: deviazioni marcate dalla linea 45° → non normalità.  
-- **Breusch–Pagan**: p<0.05 → eteroscedasticità (valutare SE robusti, già applicati).  
-- **VIF**: collinearità alta inflaziona le varianze stimate dei coefficienti.
+- **R² / R² adj.**: quota di varianza spiegata (R² adj. penalizza modelli troppo complessi).  
+- **Coefficienti**: effetto marginale; IC95% e p-value quantificano l’incertezza.  
+- **Residui vs Fitted**: pattern ≠ casuale → non linearità o eteroscedasticità.  
+- **Q-Q residui**: deviazioni dalla diagonale → non normalità.  
+- **Breusch–Pagan**: p<0.05 → eteroscedasticità (qui SE robusti HC3 già applicati).  
+- **VIF**: collinearità alta inflaziona varianze dei coefficienti.
 """)
 
 # -----------------------------
-# Regressione LOGISTICA (binaria, covarianze robuste ove possibile)
+# Regressione LOGISTICA (binaria)
 # -----------------------------
 elif model_type == "Logistica (binaria)":
     # outcome binario: scelta della classe positiva
@@ -264,10 +269,9 @@ elif model_type == "Logistica (binaria)":
         st.error("Dati insufficienti per stimare il modello (pochi casi utili o nessun predittore dopo la codifica).")
         st.stop()
 
-    # statsmodels Logit
+    # statsmodels Logit + (tentativo) covarianze robuste
     try:
         logit = sm.Logit(y, X).fit(disp=False)
-        # tenta covarianze robuste (HC3) se supportate
         try:
             logit = logit.get_robustcov_results(cov_type="HC3")
         except Exception:
@@ -331,6 +335,8 @@ elif model_type == "Logistica (binaria)":
         figroc.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="lines", name="No skill", line=dict(dash="dash")))
         figroc.update_layout(title="ROC curve", xaxis_title="FPR", yaxis_title="TPR")
         st.plotly_chart(figroc, use_container_width=True)
+        st.caption("**Come leggere — ROC curve:** curva più lontana dalla diagonale indica migliore discriminazione. "
+                   "L’**AUC** riassume l’accuratezza indipendente dalla soglia (0.5 casuale; >0.7 accettabile; >0.8 buona; >0.9 eccellente).")
 
         # Confusion matrix & metrics
         cm = confusion_matrix(y, y_pred, labels=[1,0])
@@ -339,6 +345,9 @@ elif model_type == "Logistica (binaria)":
             text=cm, texttemplate="%{text}", colorscale="Blues"))
         figcm.update_layout(title="Confusion matrix", xaxis_title="", yaxis_title="")
         st.plotly_chart(figcm, use_container_width=True)
+        st.caption("**Come leggere — Confusion matrix:** TP (pred 1 | true 1), TN (pred 0 | true 0); "
+                   "FP e FN quantificano rispettivamente falsi allarmi e mancate identificazioni. "
+                   "Valutare anche Precision, Recall e F1 in funzione della soglia scelta.")
 
         prec, rec, f1, _ = precision_recall_fscore_support(y, y_pred, average="binary", zero_division=0)
         st.write(pd.DataFrame({"Precision": [prec], "Recall": [rec], "F1": [f1], "Accuracy":[(y==y_pred).mean()]}).round(3))
@@ -365,14 +374,13 @@ elif model_type == "Logistica (binaria)":
         })
         st.success("Modello logit aggiunto al Results Summary.")
 
-    # Guida interpretativa
+    # Guida interpretativa sintetica
     with st.expander("ℹ️ Come leggere i risultati (Logistica)", expanded=False):
         st.markdown(f"""
-- **Odds Ratio (OR)**: effetto moltiplicativo sul **rapporto di odds** della classe positiva (**{positive_class}**).
-  - OR > 1 aumenta la probabilità relativa della classe positiva; OR < 1 la riduce.
-  - IC95% che **non** include 1 → effetto statisticamente significativo.
-- **Pseudo-R² (McFadden)**: misura di bontà di adattamento (0 = modello nullo; 0.2–0.4 spesso considerato “buono”).
-- **ROC/AUC**: capacità discriminante indipendente dalla soglia (AUC=0.5 casuale; 0.7–0.8 accettabile; 0.8–0.9 buono; >0.9 eccellente).
+- **Odds Ratio (OR)**: effetto moltiplicativo sul **rapporto di odds** della classe positiva (**{positive_class}**).  
+  OR>1 ↑ probabilità relativa, OR<1 ↓. IC95% che **non** include 1 → effetto significativo.  
+- **Pseudo-R² (McFadden)**: bontà di adattamento (0 = nullo; ~0.2–0.4 spesso “buono”).  
+- **ROC/AUC**: accuratezza indipendente dalla soglia; più la curva è lontana dalla diagonale, meglio è.  
 - **Confusion matrix / Precision / Recall / F1**: dipendono dalla **soglia** scelta.
 """)
 
@@ -405,7 +413,7 @@ else:  # "Logistica regolarizzata (L1/L2)"
         st.stop()
 
     pipe = make_pipeline(
-        StandardScaler(with_mean=False),  # con sparse/dummies
+        StandardScaler(with_mean=False),  # compatibile con sparse/dummies
         LogisticRegression(penalty=penalty, C=C_val, solver=solver, max_iter=int(max_iter))
     )
     pipe.fit(X, y)
@@ -416,7 +424,8 @@ else:  # "Logistica regolarizzata (L1/L2)"
     ORs = np.exp(coefs)
     coef_df = pd.DataFrame({"term": X.columns, "coef": coefs, "OR (exp coef)": ORs}).round(4)
     st.dataframe(coef_df, use_container_width=True)
-    st.caption("Nota: i coefficienti sono penalizzati (riduzione overfitting/collinearità).")
+    st.caption("**Come leggere — Coefficienti penalizzati:** la penalizzazione riduce overfitting e collinearità; "
+               "i coefficienti piccoli possono essere spinti verso 0 (soprattutto con L1).")
 
     # Prestazioni
     st.subheader("Valutazione predittiva")
@@ -432,6 +441,7 @@ else:  # "Logistica regolarizzata (L1/L2)"
         figroc.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="lines", name="No skill", line=dict(dash="dash")))
         figroc.update_layout(title="ROC curve", xaxis_title="FPR", yaxis_title="TPR")
         st.plotly_chart(figroc, use_container_width=True)
+        st.caption("**Come leggere — ROC curve:** come sopra; l’AUC riassume la discriminazione del modello su tutte le soglie.")
 
         cm = confusion_matrix(y, y_pred, labels=[1,0])
         figcm = go.Figure(data=go.Heatmap(
@@ -439,7 +449,8 @@ else:  # "Logistica regolarizzata (L1/L2)"
             text=cm, texttemplate="%{text}", colorscale="Blues"))
         figcm.update_layout(title="Confusion matrix", xaxis_title="", yaxis_title="")
         st.plotly_chart(figcm, use_container_width=True)
-
+        st.caption("**Come leggere — Confusion matrix:** bilanci il trade-off tra FP e FN regolando la soglia; "
+                   "osservi l’impatto su Precision, Recall e F1 riportati sotto.")
         prec, rec, f1, _ = precision_recall_fscore_support(y, y_pred, average="binary", zero_division=0)
         st.write(pd.DataFrame({"Precision": [prec], "Recall": [rec], "F1": [f1], "Accuracy":[(y==y_pred).mean()]}).round(3))
     else:
