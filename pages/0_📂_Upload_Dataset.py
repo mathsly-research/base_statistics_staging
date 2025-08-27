@@ -51,28 +51,42 @@ else:
     st.info("Carica un file per iniziare.")
 
 # ---------------------------------
-# Navigazione agli step successivi
+# Navigazione agli step successivi (stile card)
 # ---------------------------------
 PAGES = [
-    ("pages/1_🧹_Data_Cleaning.py",        "Vai a: Cleaning",               "🧹"),
-    ("pages/2_📈_Descriptive_Statistics.py","Vai a: Descrittive",            "📈"),
-    ("pages/3_📊_Explore_Distributions.py", "Vai a: Esplora distribuzioni",  "📊"),
-    ("pages/4_🔍_Assumption_Checks.py",     "Vai a: Assumption checks",      "🔍"),
-    ("pages/5_🧪_Statistical_Tests.py",     "Vai a: Test statistici",        "🧪"),
-    ("pages/6_🔗_Correlation.py",           "Vai a: Correlazioni",           "🔗"),
-    # In futuro: Results Summary
-    # ("pages/7_🧾_Results_Summary.py",     "Vai a: Results Summary",        "🧾"),
+    ("pages/1_🧹_Data_Cleaning.py",        "🧹 Cleaning",         "Gestione missing values e filtri"),
+    ("pages/2_📈_Descriptive_Statistics.py","📈 Descrittive",      "Statistiche di base e riepilogo variabili"),
+    ("pages/3_📊_Explore_Distributions.py", "📊 Distribuzioni",    "Istogrammi, boxplot e violino per esplorare i dati"),
+    ("pages/4_🔍_Assumption_Checks.py",     "🔍 Assunzioni",       "Verifica normalità, omoscedasticità e indipendenza"),
+    ("pages/5_🧪_Statistical_Tests.py",     "🧪 Test statistici",  "Confronto gruppi, test parametrici e non parametrici"),
+    ("pages/6_🔗_Correlation.py",           "🔗 Correlazioni",     "Relazioni tra variabili, scatterplot e heatmap"),
+    # Futuro: Results Summary
+    # ("pages/7_🧾_Results_Summary.py",     "🧾 Report finale",   "Sintesi dei risultati ed esportazione")
 ]
 
 st.divider()
-st.subheader("Navigazione")
+st.subheader("🚀 Navigazione rapida agli step")
 
-col_nav1, col_nav2, col_nav3 = st.columns(3)
-cols = [col_nav1, col_nav2, col_nav3]
-
+cols = st.columns(2)  # due colonne = layout più ampio e leggibile
 i = 0
-for page_path, label, icon in PAGES:
+for page_path, title, desc in PAGES:
     if Path(page_path).exists():
-        with cols[i % 3]:
-            st.page_link(page_path, label=f"{label}", icon=icon)
+        with cols[i % 2]:
+            st.markdown(
+                f"""
+                <div style="border:2px solid #ddd; border-radius:15px; padding:15px; margin-bottom:15px; 
+                            box-shadow:2px 2px 10px rgba(0,0,0,0.05); background-color:#f9f9f9;">
+                    <h4 style="margin-bottom:5px;">{title}</h4>
+                    <p style="margin-top:0; color:gray; font-size:0.9em;">{desc}</p>
+                    <a href='/{page_path}' target='_self' style='text-decoration:none;'>
+                        <button style="background-color:#4CAF50; color:white; padding:8px 16px; 
+                                       border:none; border-radius:10px; cursor:pointer;">
+                            Vai →
+                        </button>
+                    </a>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
         i += 1
+
