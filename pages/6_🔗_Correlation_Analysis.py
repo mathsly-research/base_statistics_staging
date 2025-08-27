@@ -42,7 +42,6 @@ if mode == "Due variabili":
     with c2:
         var2 = st.selectbox("Variabile 2", options=[c for c in num_cols if c != var1])
 
-    x, y = df[var1].dropna(), df[var2].dropna()
     common = df[[var1, var2]].dropna()
 
     if common.shape[0] < 3:
@@ -55,10 +54,24 @@ if mode == "Due variabili":
         st.write(f"**Pearson r = {pearson_r:.3f}, p = {pearson_p:.3g}**")
         st.write(f"**Spearman ρ = {spearman_r:.3f}, p = {spearman_p:.3g}**")
 
-        # Scatterplot
+        # Scatterplot con linea di regressione OLS
         fig = px.scatter(common, x=var1, y=var2, trendline="ols",
                          title=f"Scatterplot: {var1} vs {var2} (linea di regressione OLS)")
         st.plotly_chart(fig, use_container_width=True)
+
+        # ➕ Aggiungi al Results Summary
+        if st.button("➕ Aggiungi al Results Summary"):
+            st.session_state.report_items.append({
+                "type": "text",
+                "title": f"Correlazione {var1} vs {var2}",
+                "content": {
+                    "pearson_r": pearson_r,
+                    "pearson_p": pearson_p,
+                    "spearman_r": spearman_r,
+                    "spearman_p": spearman_p
+                }
+            })
+            st.success(f"Correlazione {var1}–{var2} aggiunta al Results Summary.")
 
 # -----------------------------
 # Matrice di correlazione
@@ -72,6 +85,15 @@ else:
     st.plotly_chart(fig, use_container_width=True)
 
     st.dataframe(corr.round(3), use_container_width=True)
+
+    # ➕ Aggiungi matrice al Results Summary
+    if st.button("➕ Aggiungi matrice al Results Summary"):
+        st.session_state.report_items.append({
+            "type": "table",
+            "title": "Matrice di correlazione (Pearson)",
+            "content": corr.round(3).to_dict()
+        })
+        st.success("Matrice di correlazione aggiunta al Results Summary.")
 
 # -----------------------------
 # Guida interpretativa
