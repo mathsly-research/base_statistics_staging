@@ -1,132 +1,420 @@
-# -*- coding: utf-8 -*-
+# pages/6_🔗_Correlation_Analysis.py
+from __future__ import annotations
+import math
 import streamlit as st
 import pandas as pd
 import numpy as np
-from scipy import stats
-import plotly.express as px
 
-from core.state import init_state
-from core.validate import dataset_diagnostics
-from core.ui import quality_alert
+# Plotting (opzionale)
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+except Exception:
+    px = None
+    go = None
 
-# -----------------------------
-# Init & dataset check
-# -----------------------------
-init_state()
-st.title("🔗 Step 7 — Analisi di correlazione")
+# Statistiche (opzionale)
+try:
+    from scipy import stats
+    from scipy.cluster.hierarchy import linkage, leaves_list
+    from scipy.spatial.distance import squareform
+except Exception:
+    stats = None
+    linkage = None
+    leaves_list = None
+    squareform = None
 
-if st.session_state.df is None:
-    st.warning("Nessun dataset in memoria. Carichi i dati in **Upload Dataset**.")
-    st.page_link("pages/1_📂_Upload_Dataset.py", label="➡️ Vai a Upload Dataset", icon="📂")
+try:
+    import statsmodels.api as sm
+except Exception:
+    sm = None
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Data store centralizzato (+ fallback)
+# ──────────────────────────────────────────────────────────────────────────────
+try:
+    from data_store import ensure_initialized, get_active, stamp_meta
+except Exception:
+    def ensure_initialized():
+        st.session_state.setdefault("ds_active_df", None)
+        st.session_state.setdefault("ds_meta", {"version": 0, "updated_at": None, "source": None, "note": ""})
+    def get_active(required: bool = True):
+        ensure_initialized()
+        df = st.session_state.get("ds_active_df")
+        if required and (df is None or df.empty):
+            st.error("Nessun dataset attivo. Importi i dati e completi la pulizia.")
+            st.stop()
+        return df
+    def stamp_meta():
+        ensure_initialized()
+        meta = st.session_state["ds_meta"]
+        ver = meta.get("version", 0)
+        src = meta.get("source") or "-"
+        ts = meta.get("updated_at")
+        when = "-"
+        if ts:
+            from datetime import datetime
+            when = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+        c1, c2, c3 = st.columns(3)
+        with c1: st.metric("Versione dati", ver)
+        with c2: st.metric("Origine", src)
+        with c3: st.metric("Ultimo aggiornamento", when)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Config pagina + nav
+# ──────────────────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="🔗 Correlation Analysis", layout="wide")
+try:
+    from nav import sidebar
+    sidebar()
+except Exception:
+    pass
+
+KEY = "ca"  # correlation analysis
+def k(name: str) -> str: return f"{KEY}_{name}"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Header
+# ──────────────────────────────────────────────────────────────────────────────
+st.title("🔗 Correlation Analysis")
+st.caption("Matrice delle correlazioni, analisi puntuale delle coppie e correlazioni parziali, con guida alla lettura.")
+
+ensure_initialized()
+df = get_active(required=True)
+
+with st.expander("Stato dati", expanded=False):
+    stamp_meta()
+
+# Variabili
+num_vars = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+cat_vars = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])]
+
+if not num_vars:
+    st.warning("Non sono state rilevate variabili numeriche.")
     st.stop()
 
-df: pd.DataFrame = st.session_state.df
-num_cols = list(df.select_dtypes(include="number").columns)
+if px is None:
+    st.info("Plotly non è disponibile nell'ambiente. Le visualizzazioni interattive potrebbero non comparire.")
 
-if not num_cols:
-    st.error("Non ci sono variabili numeriche nel dataset.")
-    st.stop()
+# ──────────────────────────────────────────────────────────────────────────────
+# Helper
+# ──────────────────────────────────────────────────────────────────────────────
+def _safe_num_pair(x: pd.Series, y: pd.Series):
+    """Allinea X e Y e rimuove NA pairwise."""
+    xy = pd.DataFrame({"x": pd.to_numeric(x, errors="coerce"),
+                       "y": pd.to_numeric(y, errors="coerce")}).dropna()
+    return xy["x"].values, xy["y"].values
 
-# -----------------------------
-# Scelta modalità
-# -----------------------------
-mode = st.radio("Seleziona modalità:", ["Due variabili", "Matrice completa"], horizontal=True)
-
-# -----------------------------
-# Correlazione a coppia
-# -----------------------------
-if mode == "Due variabili":
-    c1, c2 = st.columns(2)
-    with c1:
-        var1 = st.selectbox("Variabile 1", options=num_cols)
-    with c2:
-        var2 = st.selectbox("Variabile 2", options=[c for c in num_cols if c != var1])
-
-    common = df[[var1, var2]].dropna()
-
-    if common.shape[0] < 3:
-        st.error("Dati insufficienti per calcolare la correlazione.")
+def _corr_and_p(x: np.ndarray, y: np.ndarray, method: str):
+    """Ritorna (rho, p, n, ci_lo, ci_hi) – CI solo per Pearson."""
+    n = min(len(x), len(y))
+    if stats is None or n < 3:
+        return (np.nan, np.nan, n, np.nan, np.nan)
+    if method == "Pearson":
+        r, p = stats.pearsonr(x, y)
+        # CI via Fisher z
+        if n > 3:
+            z = 0.5 * np.log((1+r)/(1-r))
+            se = 1 / math.sqrt(n - 3)
+            zcrit = stats.norm.ppf(1 - 0.05/2)
+            lo_z, hi_z = z - zcrit*se, z + zcrit*se
+            lo = (np.exp(2*lo_z)-1)/(np.exp(2*lo_z)+1)
+            hi = (np.exp(2*hi_z)-1)/(np.exp(2*hi_z)+1)
+        else:
+            lo = hi = np.nan
+        return (r, p, n, lo, hi)
+    elif method == "Spearman":
+        r, p = stats.spearmanr(x, y)
+        return (r, p, n, np.nan, np.nan)
     else:
-        pearson_r, pearson_p = stats.pearsonr(common[var1], common[var2])
-        spearman_r, spearman_p = stats.spearmanr(common[var1], common[var2])
+        r, p = stats.kendalltau(x, y)
+        return (r, p, n, np.nan, np.nan)
 
-        st.subheader("Risultati")
-        st.write(f"**Pearson r = {pearson_r:.3f}, p = {pearson_p:.3g}**")
-        st.write(f"**Spearman ρ = {spearman_r:.3f}, p = {spearman_p:.3g}**")
+def _p_adjust(pvals: np.ndarray, method: str):
+    """Holm / BH (FDR) / None"""
+    p = np.array(pvals, dtype=float)
+    m = len(p)
+    if m == 0 or method == "Nessuna":
+        return p
+    order = np.argsort(p)
+    ranks = np.empty_like(order); ranks[order] = np.arange(1, m+1)
+    if method == "Holm":
+        # Holm step-down
+        adj = np.empty_like(p)
+        sorted_p = p[order]
+        adj_sorted = (m - np.arange(m) ) * sorted_p
+        # cummax in ordine inverso
+        for i in range(m-2, -1, -1):
+            adj_sorted[i] = max(adj_sorted[i], adj_sorted[i+1])
+        adj = adj_sorted[np.argsort(order)]
+        return np.minimum(adj, 1.0)
+    elif method in ("BH (FDR)", "Benjamini–Hochberg"):
+        adj = np.empty_like(p)
+        sorted_p = p[order]
+        adj_sorted = m / np.arange(1, m+1) * sorted_p
+        # cummin al contrario
+        for i in range(m-2, -1, -1):
+            adj_sorted[i] = min(adj_sorted[i], adj_sorted[i+1])
+        adj = adj_sorted[np.argsort(order)]
+        return np.minimum(adj, 1.0)
+    else:
+        return p
 
-        # Scatterplot con linea di regressione OLS
-        fig = px.scatter(common, x=var1, y=var2, trendline="ols",
-                         title=f"Scatterplot: {var1} vs {var2} (linea di regressione OLS)")
+def _cluster_order(corr: pd.DataFrame):
+    """Ordina variabili tramite clustering gerarchico su 1-|r| (se SciPy disponibile)."""
+    try:
+        if linkage is None or leaves_list is None or squareform is None:
+            # fallback: ordina per somma(|r|) decrescente
+            score = corr.abs().sum().sort_values(ascending=False)
+            return score.index.tolist()
+        # distanza: 1 - |r|
+        d = 1 - corr.abs()
+        np.fill_diagonal(d.values, 0.0)
+        condensed = squareform(d.values, checks=False)
+        Z = linkage(condensed, method="average")
+        order_idx = leaves_list(Z)
+        return corr.index[order_idx].tolist()
+    except Exception:
+        return corr.columns.tolist()
+
+def _partial_corr(x: pd.Series, y: pd.Series, covars: list[str], method: str = "Pearson"):
+    """Correlazione parziale: regressa X e Y su covariate e correla i residui.
+       Per Spearman, applica rank-transform prima di regressione."""
+    if len(covars) == 0:
+        xx, yy = _safe_num_pair(x, y)
+        return _corr_and_p(xx, yy, "Pearson" if method == "Pearson" else "Spearman")
+    X = pd.DataFrame({"_x": x, "_y": y}, copy=True)
+    for c in covars: X[c] = df[c]
+    # rank-transform per Spearman
+    if method == "Spearman":
+        X = X.apply(lambda s: s.rank(method="average") if pd.api.types.is_numeric_dtype(s) else s)
+    # drop NA listwise
+    X = X.apply(pd.to_numeric, errors="coerce").dropna()
+    if X.shape[0] < 5:
+        return (np.nan, np.nan, X.shape[0], np.nan, np.nan)
+    # regressioni lineari per residui (aggiungo costante)
+    try:
+        if sm is None:
+            # Fallback: proiezione tramite regressione OLS chiusa con numpy
+            Z = X[covars].to_numpy()
+            Z = np.column_stack([np.ones(len(Z)), Z])  # intercetta
+            beta_x, *_ = np.linalg.lstsq(Z, X["_x"].to_numpy(), rcond=None)
+            beta_y, *_ = np.linalg.lstsq(Z, X["_y"].to_numpy(), rcond=None)
+            rx = X["_x"].to_numpy() - Z.dot(beta_x)
+            ry = X["_y"].to_numpy() - Z.dot(beta_y)
+        else:
+            Z = sm.add_constant(X[covars].astype(float))
+            rx = sm.OLS(X["_x"].astype(float), Z).fit().resid
+            ry = sm.OLS(X["_y"].astype(float), Z).fit().resid
+        return _corr_and_p(np.asarray(rx), np.asarray(ry), "Pearson" if method == "Pearson" else "Spearman")
+    except Exception:
+        return (np.nan, np.nan, X.shape[0], np.nan, np.nan)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tabs principali
+# ──────────────────────────────────────────────────────────────────────────────
+tab_matrix, tab_pair, tab_partial = st.tabs(["🧩 Matrice", "🔍 Coppia", "🧭 Parziali"])
+
+# =============================================================================
+# TAB 1 · MATRICE
+# =============================================================================
+with tab_matrix:
+    st.subheader("🧩 Matrice delle correlazioni")
+    top1, top2, top3 = st.columns([2,2,2])
+    with top1:
+        method = st.selectbox("Metodo", ["Pearson", "Spearman", "Kendall"], key=k("m_method"))
+        vars_sel = st.multiselect("Variabili (numeriche)", options=num_vars, default=num_vars[: min(10, len(num_vars))], key=k("m_vars"))
+    with top2:
+        miss = st.selectbox("Gestione NA", ["pairwise (consigliato)", "listwise"], key=k("m_na"))
+        reorder = st.selectbox("Ordinamento", ["A–Z", "Clustering (|r|)"], key=k("m_ord"))
+    with top3:
+        padj = st.selectbox("Correzione p-value", ["Nessuna", "Holm", "BH (FDR)"], key=k("m_padj"))
+        show_vals = st.checkbox("Mostra valori r nella heatmap", value=True, key=k("m_showvals"))
+
+    if not vars_sel:
+        st.info("Selezioni almeno una variabile.")
+    else:
+        # Calcolo matrice r e p
+        V = vars_sel
+        r_mat = pd.DataFrame(np.eye(len(V)), index=V, columns=V, dtype=float)
+        p_mat = pd.DataFrame(np.zeros((len(V), len(V))), index=V, columns=V, dtype=float)
+        n_mat = pd.DataFrame(np.zeros((len(V), len(V))), index=V, columns=V, dtype=int)
+
+        for i, a in enumerate(V):
+            for j, b in enumerate(V[i+1:], start=i+1):
+                if miss.startswith("pairwise"):
+                    xa, yb = _safe_num_pair(df[a], df[b])
+                else:
+                    pair_df = df[V].dropna()
+                    xa, yb = pair_df[a].values, pair_df[b].values
+                r, p, n, _, _ = _corr_and_p(xa, yb, method)
+                r_mat.loc[a, b] = r_mat.loc[b, a] = r
+                p_mat.loc[a, b] = p_mat.loc[b, a] = p
+                n_mat.loc[a, b] = n_mat.loc[b, a] = n
+        # p-adjust (sopra diagonale)
+        tril_idx = np.triu_indices(len(V), k=1)
+        pvals = p_mat.values[tril_idx]
+        padj_vals = _p_adjust(pvals, padj)
+        P = p_mat.copy()
+        P.values[tril_idx] = padj_vals
+        P.values[(tril_idx[1], tril_idx[0])] = padj_vals  # copia simmetrica
+
+        # Reordering
+        if reorder.startswith("Clustering"):
+            order = _cluster_order(r_mat)
+            r_plot = r_mat.loc[order, order]
+            P_plot = P.loc[order, order]
+        else:
+            order = sorted(V)
+            r_plot = r_mat.loc[order, order]
+            P_plot = P.loc[order, order]
+
+        # Heatmap
+        if px is not None:
+            text = np.round(r_plot.values, 2).astype(str) if show_vals else None
+            fig = px.imshow(r_plot, text_auto=text, aspect="auto", origin="lower",
+                            labels=dict(color="r"), template="simple_white",
+                            title=f"Matrice di correlazione ({method})")
+            st.plotly_chart(fig, use_container_width=True, theme=None)
+
+        col_l, col_r = st.columns([3,2])
+        with col_l:
+            st.markdown("**Dettagli (r, p-adj, n)**")
+            show_tri = st.radio("Formato tabella", ["Superiore", "Completa"], horizontal=True, key=k("m_tri"))
+            tbl = r_plot.copy()
+            rows = []
+            for i, a in enumerate(r_plot.index):
+                rng = range(i+1, len(r_plot.columns)) if show_tri == "Superiore" else range(len(r_plot.columns))
+                for j in rng:
+                    b = r_plot.columns[j]
+                    if a == b and show_tri == "Completa":  # diagonale
+                        rows.append([a, b, 1.0, 0.0, int(n_mat.loc[a, b])])
+                    elif a != b:
+                        rows.append([a, b, r_plot.loc[a, b], P_plot.loc[a, b], int(n_mat.loc[a, b])])
+            out = pd.DataFrame(rows, columns=["Var A", "Var B", "r", "p (adj)", "n"]).sort_values(["Var A","Var B"])
+            st.dataframe(out, use_container_width=True, height=360)
+            # download
+            csv = out.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Scarica tabella (CSV)", csv, file_name=f"correlation_matrix_{method}.csv", mime="text/csv", key=k("m_dl"))
+        with col_r:
+            with st.expander("ℹ️ Come leggere", expanded=False):
+                st.markdown(f"""
+- **Metodo**: {method}.  
+- **r** ∈ [−1, +1]; |r|≈0.1/0.3/0.5 → piccolo/medio/grande (indicativo).  
+- **p (adj)**: p-value **corretto** ({padj}) per confronti multipli.  
+- **Clustering (|r|)** raggruppa variabili con profili simili di correlazione.  
+- **NA**: *pairwise* usa tutte le coppie disponibili; *listwise* rimuove righe con NA su **tutte** le variabili selezionate.  
+""")
+
+# =============================================================================
+# TAB 2 · COPPIA
+# =============================================================================
+with tab_pair:
+    st.subheader("🔍 Analisi di una coppia")
+    c1, c2, c3 = st.columns([2,2,2])
+    with c1:
+        x_var = st.selectbox("Variabile X (numerica)", options=num_vars, key=k("p_x"))
+    with c2:
+        y_var = st.selectbox("Variabile Y (numerica)", options=[c for c in num_vars if c != x_var], key=k("p_y"))
+    with c3:
+        method_p = st.selectbox("Metodo", ["Pearson", "Spearman", "Kendall"], key=k("p_meth"))
+
+    color_by = st.selectbox("Colore per sottogruppo (opzionale)", options=["(nessuno)"] + cat_vars, key=k("p_color"))
+    color_by = None if color_by == "(nessuno)" else color_by
+
+    x_arr, y_arr = _safe_num_pair(df[x_var], df[y_var])
+    r, p, n, lo, hi = _corr_and_p(x_arr, y_arr, method_p)
+
+    # Risultati
+    st.markdown(
+        f"**n = {n}**, **r = {r:.3f}**, **p = {p:.4f}**"
+        + (f", **CI95% r = ({lo:.3f}, {hi:.3f})**" if method_p == "Pearson" and not (np.isnan(lo) or np.isnan(hi)) else "")
+    )
+
+    # Grafico
+    if px is not None:
+        plot_df = pd.DataFrame({x_var: df[x_var], y_var: df[y_var]})
+        if color_by:
+            plot_df[color_by] = df[color_by].astype(str)
+        fig = px.scatter(plot_df, x=x_var, y=y_var, color=color_by if color_by else None,
+                         template="simple_white", title=f"{y_var} vs {x_var}")
+        # trendline solo per Pearson
+        if method_p == "Pearson" and sm is not None:
+            try:
+                fig_tr = px.scatter(plot_df.dropna(), x=x_var, y=y_var, color=color_by if color_by else None,
+                                    template="simple_white", trendline="ols")
+                # prendo la traccia di trendline e la porto su fig
+                for tr in fig_tr.data:
+                    if "trendline" in tr.name:
+                        fig.add_trace(tr)
+            except Exception:
+                pass
         st.plotly_chart(fig, use_container_width=True)
 
-        # ➕ Aggiungi al Results Summary
-        if st.button("➕ Aggiungi al Results Summary"):
-            st.session_state.report_items.append({
-                "type": "text",
-                "title": f"Correlazione {var1} vs {var2}",
-                "content": {
-                    "pearson_r": pearson_r,
-                    "pearson_p": pearson_p,
-                    "spearman_r": spearman_r,
-                    "spearman_p": spearman_p
-                }
-            })
-            st.success(f"Correlazione {var1}–{var2} aggiunta al Results Summary.")
-
-# -----------------------------
-# Matrice di correlazione
-# -----------------------------
-else:
-    st.subheader("Matrice di correlazione (Pearson)")
-
-    # scelta scala colori
-    cmap = st.selectbox(
-        "Scegli la scala colori della heatmap:",
-        ["Spectral", "Viridis", "Picnic", "RdBu_r", "Plasma"],
-        index=0
-    )
-
-    corr = df[num_cols].corr(method="pearson")
-
-    fig = px.imshow(
-        corr,
-        text_auto=".2f",
-        color_continuous_scale=cmap,
-        zmin=-1, zmax=1
-    )
-    fig.update_layout(
-        title="Heatmap correlazioni (Pearson)",
-        template="plotly_white",
-        coloraxis_colorbar=dict(title="r", tickvals=[-1, -0.5, 0, 0.5, 1])
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    st.dataframe(corr.round(3), use_container_width=True)
-
-    # ➕ Aggiungi matrice al Results Summary
-    if st.button("➕ Aggiungi matrice al Results Summary"):
-        st.session_state.report_items.append({
-            "type": "table",
-            "title": "Matrice di correlazione (Pearson)",
-            "content": corr.round(3).to_dict()
-        })
-        st.success("Matrice di correlazione aggiunta al Results Summary.")
-
-# -----------------------------
-# Guida interpretativa
-# -----------------------------
-with st.expander("ℹ️ Come leggere i risultati"):
-    st.markdown("""
-**Interpretazione della forza della correlazione (valori assoluti):**  
-- 0.00–0.19 → trascurabile  
-- 0.20–0.39 → debole  
-- 0.40–0.59 → moderata  
-- 0.60–0.79 → forte  
-- 0.80–1.00 → molto forte  
-
-**Quando usare Pearson vs Spearman:**  
-- **Pearson** → relazioni lineari, dati normali.  
-- **Spearman** → relazioni monotone, dati ordinali o non normali.  
-
-⚠️ La correlazione non implica causalità. È solo una misura statistica di associazione.
+    with st.expander("ℹ️ Come leggere", expanded=False):
+        st.markdown(f"""
+- **{method_p}**: misura la relazione tra **{x_var}** e **{y_var}** ({'lineare' if method_p=='Pearson' else 'monotona'}).  
+- **r** indica forza e direzione; **p** la significatività statistica; per Pearson è mostrata la **CI95%**.  
+- Verifichi **outlier** e **non linearità** dal grafico; il trendline è mostrato solo per Pearson.  
 """)
+
+# =============================================================================
+# TAB 3 · PARZIALI
+# =============================================================================
+with tab_partial:
+    st.subheader("🧭 Correlazioni parziali")
+    if len(num_vars) < 3:
+        st.info("Servono almeno due variabili numeriche più ≥1 covariata.")
+    else:
+        c1, c2 = st.columns([2,2])
+        with c1:
+            x_var2 = st.selectbox("Variabile X", options=num_vars, key=k("pc_x"))
+            y_candidates = [c for c in num_vars if c != x_var2]
+            y_var2 = st.selectbox("Variabile Y", options=y_candidates, key=k("pc_y"))
+        with c2:
+            covars = st.multiselect("Covariate (controllo)", options=[c for c in num_vars if c not in (x_var2, y_var2)], key=k("pc_cov"))
+            method_pc = st.selectbox("Metodo", ["Pearson", "Spearman"], key=k("pc_method"))
+
+        r, p, n, lo, hi = _partial_corr(df[x_var2], df[y_var2], covars, method_pc)
+        st.markdown(
+            f"**n = {n}**, **r_parz = {r:.3f}**, **p = {p:.4f}**"
+            + (f", **CI95% r (appross.) = ({lo:.3f}, {hi:.3f})**" if method_pc == "Pearson" and not (np.isnan(lo) or np.isnan(hi)) else "")
+        )
+
+        if px is not None and len(covars) > 0:
+            # Visualizzo i residui (X|cov) vs (Y|cov)
+            try:
+                # Residualizzazione (come in helper)
+                data = pd.DataFrame({"_x": df[x_var2], "_y": df[y_var2]}, copy=True)
+                for c in covars: data[c] = df[c]
+                data = data.apply(pd.to_numeric, errors="coerce").dropna()
+                if sm is not None and data.shape[0] > 3:
+                    Z = sm.add_constant(data[covars].astype(float))
+                    rx = sm.OLS(data["_x"].astype(float), Z).fit().resid
+                    ry = sm.OLS(data["_y"].astype(float), Z).fit().resid
+                    plot_df2 = pd.DataFrame({"Residuo_X": rx, "Residuo_Y": ry})
+                    fig2 = px.scatter(plot_df2, x="Residuo_X", y="Residuo_Y", template="simple_white",
+                                      title=f"Residui: {x_var2}|cov vs {y_var2}|cov")
+                    st.plotly_chart(fig2, use_container_width=True)
+            except Exception:
+                pass
+
+        with st.expander("ℹ️ Come leggere", expanded=False):
+            st.markdown("""
+- **Correlazione parziale**: relazione tra X e Y **al netto** delle covariate.  
+- Se r_parz rimane simile a r grezzo → l’associazione non è spiegata dalle covariate; se diminuisce molto → probabile **confondimento**.  
+- Per **Spearman**, la parziale è calcolata su **ranghi** (robusta a outlier e non linearità monotone).
+""")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Navigazione
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown("---")
+nav1, nav2 = st.columns(2)
+with nav1:
+    if st.button("⬅️ Torna: Test statistici", use_container_width=True, key=k("go_prev")):
+        st.switch_page("pages/5_🧪_Statistical_Tests.py")
+with nav2:
+    if st.button("➡️ Vai: (Prossimo modulo)", use_container_width=True, key=k("go_next")):
+        # Adegui questo percorso al nome reale del file successivo nel suo progetto
+        st.switch_page("pages/7_📐_Regression.py")
