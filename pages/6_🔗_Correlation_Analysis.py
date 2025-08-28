@@ -137,26 +137,21 @@ def _p_adjust(pvals: np.ndarray, method: str):
     if m == 0 or method == "Nessuna":
         return p
     order = np.argsort(p)
-    ranks = np.empty_like(order); ranks[order] = np.arange(1, m+1)
+    inv = np.empty_like(order); inv[order] = np.arange(m)
     if method == "Holm":
-        # Holm step-down
-        adj = np.empty_like(p)
         sorted_p = p[order]
-        adj_sorted = (m - np.arange(m) ) * sorted_p
-        # cummax in ordine inverso
+        adj_sorted = (m - np.arange(m)) * sorted_p
         for i in range(m-2, -1, -1):
             adj_sorted[i] = max(adj_sorted[i], adj_sorted[i+1])
-        adj = adj_sorted[np.argsort(order)]
-        return np.minimum(adj, 1.0)
+        adj = np.minimum(adj_sorted[inv], 1.0)
+        return adj
     elif method in ("BH (FDR)", "Benjamini–Hochberg"):
-        adj = np.empty_like(p)
         sorted_p = p[order]
-        adj_sorted = m / np.arange(1, m+1) * sorted_p
-        # cummin al contrario
+        adj_sorted = m / (np.arange(1, m+1)) * sorted_p
         for i in range(m-2, -1, -1):
             adj_sorted[i] = min(adj_sorted[i], adj_sorted[i+1])
-        adj = adj_sorted[np.argsort(order)]
-        return np.minimum(adj, 1.0)
+        adj = np.minimum(adj_sorted[inv], 1.0)
+        return adj
     else:
         return p
 
@@ -164,10 +159,8 @@ def _cluster_order(corr: pd.DataFrame):
     """Ordina variabili tramite clustering gerarchico su 1-|r| (se SciPy disponibile)."""
     try:
         if linkage is None or leaves_list is None or squareform is None:
-            # fallback: ordina per somma(|r|) decrescente
             score = corr.abs().sum().sort_values(ascending=False)
             return score.index.tolist()
-        # distanza: 1 - |r|
         d = 1 - corr.abs()
         np.fill_diagonal(d.values, 0.0)
         condensed = squareform(d.values, checks=False)
@@ -185,19 +178,15 @@ def _partial_corr(x: pd.Series, y: pd.Series, covars: list[str], method: str = "
         return _corr_and_p(xx, yy, "Pearson" if method == "Pearson" else "Spearman")
     X = pd.DataFrame({"_x": x, "_y": y}, copy=True)
     for c in covars: X[c] = df[c]
-    # rank-transform per Spearman
     if method == "Spearman":
         X = X.apply(lambda s: s.rank(method="average") if pd.api.types.is_numeric_dtype(s) else s)
-    # drop NA listwise
     X = X.apply(pd.to_numeric, errors="coerce").dropna()
     if X.shape[0] < 5:
         return (np.nan, np.nan, X.shape[0], np.nan, np.nan)
-    # regressioni lineari per residui (aggiungo costante)
     try:
         if sm is None:
-            # Fallback: proiezione tramite regressione OLS chiusa con numpy
             Z = X[covars].to_numpy()
-            Z = np.column_stack([np.ones(len(Z)), Z])  # intercetta
+            Z = np.column_stack([np.ones(len(Z)), Z])
             beta_x, *_ = np.linalg.lstsq(Z, X["_x"].to_numpy(), rcond=None)
             beta_y, *_ = np.linalg.lstsq(Z, X["_y"].to_numpy(), rcond=None)
             rx = X["_x"].to_numpy() - Z.dot(beta_x)
@@ -269,31 +258,32 @@ with tab_matrix:
             r_plot = r_mat.loc[order, order]
             P_plot = P.loc[order, order]
 
-        # Heatmap
+        # Heatmap (FIX: niente text_auto=array; uso text + texttemplate)
         if px is not None:
-            text = np.round(r_plot.values, 2).astype(str) if show_vals else None
-            fig = px.imshow(r_plot, text_auto=text, aspect="auto", origin="lower",
+            fig = px.imshow(r_plot, aspect="auto", origin="lower",
                             labels=dict(color="r"), template="simple_white",
                             title=f"Matrice di correlazione ({method})")
+            if show_vals:
+                text_vals = np.round(r_plot.values, 2)
+                fig.update_traces(text=text_vals, texttemplate="%{text}", 
+                                  hovertemplate="r=%{z:.3f}<extra></extra>")
             st.plotly_chart(fig, use_container_width=True, theme=None)
 
         col_l, col_r = st.columns([3,2])
         with col_l:
             st.markdown("**Dettagli (r, p-adj, n)**")
             show_tri = st.radio("Formato tabella", ["Superiore", "Completa"], horizontal=True, key=k("m_tri"))
-            tbl = r_plot.copy()
             rows = []
             for i, a in enumerate(r_plot.index):
                 rng = range(i+1, len(r_plot.columns)) if show_tri == "Superiore" else range(len(r_plot.columns))
                 for j in rng:
                     b = r_plot.columns[j]
-                    if a == b and show_tri == "Completa":  # diagonale
+                    if a == b and show_tri == "Completa":
                         rows.append([a, b, 1.0, 0.0, int(n_mat.loc[a, b])])
                     elif a != b:
                         rows.append([a, b, r_plot.loc[a, b], P_plot.loc[a, b], int(n_mat.loc[a, b])])
             out = pd.DataFrame(rows, columns=["Var A", "Var B", "r", "p (adj)", "n"]).sort_values(["Var A","Var B"])
             st.dataframe(out, use_container_width=True, height=360)
-            # download
             csv = out.to_csv(index=False).encode("utf-8")
             st.download_button("⬇️ Scarica tabella (CSV)", csv, file_name=f"correlation_matrix_{method}.csv", mime="text/csv", key=k("m_dl"))
         with col_r:
@@ -325,25 +315,21 @@ with tab_pair:
     x_arr, y_arr = _safe_num_pair(df[x_var], df[y_var])
     r, p, n, lo, hi = _corr_and_p(x_arr, y_arr, method_p)
 
-    # Risultati
     st.markdown(
         f"**n = {n}**, **r = {r:.3f}**, **p = {p:.4f}**"
         + (f", **CI95% r = ({lo:.3f}, {hi:.3f})**" if method_p == "Pearson" and not (np.isnan(lo) or np.isnan(hi)) else "")
     )
 
-    # Grafico
     if px is not None:
         plot_df = pd.DataFrame({x_var: df[x_var], y_var: df[y_var]})
         if color_by:
             plot_df[color_by] = df[color_by].astype(str)
         fig = px.scatter(plot_df, x=x_var, y=y_var, color=color_by if color_by else None,
                          template="simple_white", title=f"{y_var} vs {x_var}")
-        # trendline solo per Pearson
         if method_p == "Pearson" and sm is not None:
             try:
                 fig_tr = px.scatter(plot_df.dropna(), x=x_var, y=y_var, color=color_by if color_by else None,
                                     template="simple_white", trendline="ols")
-                # prendo la traccia di trendline e la porto su fig
                 for tr in fig_tr.data:
                     if "trendline" in tr.name:
                         fig.add_trace(tr)
@@ -354,7 +340,7 @@ with tab_pair:
     with st.expander("ℹ️ Come leggere", expanded=False):
         st.markdown(f"""
 - **{method_p}**: misura la relazione tra **{x_var}** e **{y_var}** ({'lineare' if method_p=='Pearson' else 'monotona'}).  
-- **r** indica forza e direzione; **p** la significatività statistica; per Pearson è mostrata la **CI95%**.  
+- **r** indica forza e direzione; **p** la significatività; per Pearson è mostrata la **CI95%**.  
 - Verifichi **outlier** e **non linearità** dal grafico; il trendline è mostrato solo per Pearson.  
 """)
 
@@ -382,9 +368,7 @@ with tab_partial:
         )
 
         if px is not None and len(covars) > 0:
-            # Visualizzo i residui (X|cov) vs (Y|cov)
             try:
-                # Residualizzazione (come in helper)
                 data = pd.DataFrame({"_x": df[x_var2], "_y": df[y_var2]}, copy=True)
                 for c in covars: data[c] = df[c]
                 data = data.apply(pd.to_numeric, errors="coerce").dropna()
