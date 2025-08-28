@@ -1,265 +1,157 @@
-# -*- coding: utf-8 -*-
+# 2_📈_Descriptive_Statistics.py
+from __future__ import annotations
+
 import streamlit as st
 import pandas as pd
-from core.state import init_state
-from core.stats import summarize_continuous, summarize_categorical_full
-from core.validate import dataset_diagnostics
-from core.ui import quality_alert, show_missing_table
+import numpy as np
 
-# -------------------------
-# Inizializzazione stato
-# -------------------------
-init_state()
+try:
+    import plotly.express as px
+except Exception:
+    px = None
 
-st.title("📈 Step 2 — Statistiche descrittive")
+# ------------------------------
+# Configurazione pagina
+# ------------------------------
+st.set_page_config(page_title="📈 Statistiche descrittive", layout="wide")
 
-# Controllo dataset
-if st.session_state.df is None:
-    st.warning("Nessun dataset in memoria. Carichi prima i dati nella pagina **Upload Dataset**.")
-    st.page_link("pages/1_📂_Upload_Dataset.py", label="➡️ Vai a Upload Dataset", icon="📂")
-    st.stop()
+# ------------------------------
+# Utility chiavi univoche
+# ------------------------------
+KEY_PREFIX = "ds"  # descriptive statistics
 
-df = st.session_state.df
+def k(name: str) -> str:
+    return f"{KEY_PREFIX}_{name}"
 
-# Qualità dataset (breve)
-with st.expander("🔎 Stato dataset e qualità (rapido)", expanded=False):
-    diag = st.session_state.diagnostics or dataset_diagnostics(df)
-    st.session_state.diagnostics = diag
-    quality_alert(diag)
-    with st.expander("Dettaglio missing per colonna", expanded=False):
-        show_missing_table(diag)
+def ss_get(name: str, default=None):
+    return st.session_state.get(name, default)
 
-# -------------------------
-# Selezione variabili
-# -------------------------
-st.subheader("Selezione delle variabili")
-num_cols_all = list(df.select_dtypes(include="number").columns)
-cat_cols_all = list(df.select_dtypes(include=["object", "category", "bool"]).columns)
+def ss_set_default(name: str, value):
+    if name not in st.session_state:
+        st.session_state[name] = value
+
+# ------------------------------
+# Header
+# ------------------------------
+st.title("📈 Statistiche descrittive")
+st.markdown(
+    """
+Questa sezione permette di esplorare i dati in modo **guidato e intuitivo**:
+1. Confermi che i dati siano disponibili.  
+2. Selezioni le variabili da analizzare.  
+3. Ottenga tabelle descrittive e grafici automatici.  
+"""
+)
+
+# ==============================
+# PASSO 0 · Recupero dati
+# ==============================
+st.subheader("Passo 0 · Dati disponibili")
+
+df, found_key = None, None
+for key in ["cleaned_df", "uploaded_df", "df_upload", "main_df", "dataset", "df"]:
+    if key in st.session_state and isinstance(st.session_state[key], pd.DataFrame):
+        df, found_key = st.session_state[key], key
+        break
+
+if df is not None and not df.empty:
+    st.success(f"Dataset pronto: {df.shape[0]} righe × {df.shape[1]} colonne")
+    st.dataframe(df.head(15), use_container_width=True)
+else:
+    st.error("Nessun dataset trovato. Torni al passo precedente (Pulizia Dati) oppure carichi un file.")
+    uploaded = st.file_uploader("Carichi qui un CSV/XLSX", type=["csv", "xlsx", "xls"], key=k("upload"))
+    if uploaded is not None:
+        try:
+            if uploaded.name.endswith(".csv"):
+                df = pd.read_csv(uploaded)
+            else:
+                df = pd.read_excel(uploaded)
+            st.session_state["uploaded_df"] = df.copy()
+            st.success("File caricato con successo.")
+        except Exception as e:
+            st.error(f"Errore caricamento: {e}")
+    if df is None or df.empty:
+        st.stop()
+
+# ==============================
+# PASSO 1 · Selezione variabili
+# ==============================
+st.subheader("Passo 1 · Selezione variabili")
+
+num_vars = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+cat_vars = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])]
 
 c1, c2 = st.columns(2)
 with c1:
-    num_cols = st.multiselect(
-        "Variabili **continue**",
-        options=num_cols_all,
-        default=num_cols_all,
-        help="Selezioni le variabili numeriche per le statistiche (media, mediana, ecc.)."
-    )
+    sel_num = st.multiselect("Variabili numeriche", options=num_vars, default=num_vars[:3], key=k("sel_num"))
 with c2:
-    cat_cols = st.multiselect(
-        "Variabili **categoriche**",
-        options=cat_cols_all,
-        default=cat_cols_all,
-        help="Selezioni le variabili testuali/booleane (distribuzioni di frequenza)."
-    )
+    sel_cat = st.multiselect("Variabili categoriali", options=cat_vars, default=cat_vars[:2], key=k("sel_cat"))
 
-# -------------------------
-# Opzioni (continue)
-# -------------------------
-st.subheader("Opzioni per le variabili continue")
+if not sel_num and not sel_cat:
+    st.warning("Selezioni almeno una variabile.")
+    st.stop()
 
-c3, c4, c5 = st.columns([1.2, 1, 1])
-with c3:
-    exclude_outliers = st.checkbox(
-        "Escludi outlier (regola IQR)",
-        value=False,
-        help="Esclude i valori fuori da [Q1−1.5·IQR, Q3+1.5·IQR]."
-    )
-with c4:
-    transform = st.radio(
-        "Trasformazione (facoltativa)",
-        options=["Nessuna", "Log10", "Box-Cox"],
-        index=0,
-        help="Le trasformazioni possono rendere più 'simmetriche' le distribuzioni."
-    )
-with c5:
-    show_raw = st.checkbox(
-        "Mostra anche versione **senza trasformazioni**",
-        value=False,
-        help="Confronta i risultati con e senza trasformazione."
-    )
+# ==============================
+# PASSO 2 · Tabelle descrittive
+# ==============================
+st.subheader("Passo 2 · Tabelle descrittive")
 
-with st.expander("ℹ️ Cosa sono le trasformazioni (spiegazione semplice)", expanded=False):
-    st.markdown("""
-**Perché trasformare?**  
-Quando una variabile è molto asimmetrica, una trasformazione può migliorare leggibilità e stabilità delle misure.
+if sel_num:
+    st.markdown("**Statistiche per variabili numeriche**")
+    desc_num = df[sel_num].describe().T
+    desc_num["missing"] = df[sel_num].isna().sum()
+    desc_num["unique"] = df[sel_num].nunique()
+    st.dataframe(desc_num, use_container_width=True)
 
-- **Log10**: riduce l’impatto dei valori molto grandi (si applica uno shift automatico se presenti valori ≤ 0).
-- **Box-Cox**: famiglia di trasformazioni che sceglie un parametro λ (richiede dati positivi; applichiamo uno shift se serve).
+if sel_cat:
+    st.markdown("**Distribuzione variabili categoriali**")
+    tab_cat = {c: df[c].value_counts(dropna=False) for c in sel_cat}
+    for c, tab in tab_cat.items():
+        st.markdown(f"**{c}**")
+        st.dataframe(tab.to_frame("Frequenza"), use_container_width=True)
 
-Per comunicazione non tecnica, può preferire i valori **non trasformati**.
-""")
+# ==============================
+# PASSO 3 · Grafici
+# ==============================
+st.subheader("Passo 3 · Visualizzazioni")
 
-# -------------------------
-# Calcolo (caching) — versione V2 per forzare refresh
-# -------------------------
-@st.cache_data(show_spinner=False)
-def compute_summaries_v2(df_in: pd.DataFrame, num_cols, cat_cols, exclude_outliers: bool, transform_label: str,
-                         cat_denominator: str):
-    # mappa etichetta → parametro
-    _map = {"Nessuna": None, "Log10": "log10", "Box-Cox": "box-cox"}
-    transform_param = _map.get(transform_label, None)
-    cont = summarize_continuous(
-        df_in,
-        cols=list(num_cols),
-        exclude_outliers=exclude_outliers,
-        transform=transform_param
-    )
-    cat_full = summarize_categorical_full(
-        df_in,
-        cols=list(cat_cols),
-        denominator=cat_denominator  # "total" o "valid"
-    )
-    return cont, cat_full
+if px is None:
+    st.info("Plotly non disponibile nell'ambiente, impossibile generare grafici interattivi.")
+else:
+    g_num, g_cat = st.tabs(["Numeriche", "Categoriali"])
 
-# -------------------------
-# Presentazione (formati)
-# -------------------------
-st.subheader("Presentazione delle tabelle")
-c_fmt1, c_fmt2, c_fmt3, c_fmt4 = st.columns([1.2, 1, 1, 1.2])
-with c_fmt1:
-    simple_view = st.toggle(
-        "Vista semplice (continue) — consigliata",
-        value=True,
-        help="Mostra le colonne essenziali per le continue."
-    )
-with c_fmt2:
-    dec = st.number_input("Decimali (continue)", min_value=0, max_value=6, value=2, step=1)
-with c_fmt3:
-    perc_dec = st.number_input("Decimali (%)", min_value=0, max_value=3, value=1, step=1)
-with c_fmt4:
-    cat_denominator = st.radio(
-        "Percentuali categoriche calcolate su",
-        options=["total", "valid"],
-        index=0,
-        help="• total = sul totale delle osservazioni (inclusi missing);\n• valid = solo sui valori non mancanti."
-    )
+    with g_num:
+        if sel_num:
+            var_num = st.selectbox("Scegli una variabile numerica", options=sel_num, key=k("plot_num"))
+            fig = px.histogram(df, x=var_num, nbins=30, marginal="box", title=f"Distribuzione di {var_num}")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Nessuna variabile numerica selezionata.")
 
-cont_summary, cat_summary = compute_summaries_v2(
-    df, tuple(num_cols), tuple(cat_cols), exclude_outliers, transform, cat_denominator
+    with g_cat:
+        if sel_cat:
+            var_cat = st.selectbox("Scegli una variabile categoriale", options=sel_cat, key=k("plot_cat"))
+            fig = px.bar(df[var_cat].value_counts().reset_index(),
+                         x="index", y=var_cat, title=f"Distribuzione di {var_cat}")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Nessuna variabile categoriale selezionata.")
+
+# ==============================
+# PASSO 4 · Esportazione
+# ==============================
+st.subheader("Passo 4 · Salva ed esporta")
+
+save_btn = st.button("Salva dataset per le analisi successive", key=k("save"))
+if save_btn:
+    st.session_state["descriptive_df"] = df.copy()
+    st.success("Dataset salvato in `descriptive_df`.")
+
+csv_bytes = df.to_csv(index=False).encode("utf-8")
+st.download_button(
+    label="⬇️ Scarica CSV",
+    data=csv_bytes,
+    file_name="dataset_descrittive.csv",
+    mime="text/csv",
+    key=k("download")
 )
-
-# -------------------------
-# Continue (vista semplice / dettagliata)
-# -------------------------
-st.subheader("Risultati — Variabili continue")
-
-def format_continuous_simple(df_in: pd.DataFrame) -> pd.DataFrame:
-    cols = {
-        "variable": "Variabile",
-        "n": "N",
-        "missing_pct": "% Missing",
-        "mean": "Media",
-        "sd": "Dev. std",
-        "median": "Mediana",
-        "p25": "Q1",
-        "p75": "Q3",
-        "min": "Min",
-        "max": "Max",
-    }
-    out = df_in[list(cols.keys())].rename(columns=cols)
-    num_cols_fmt = ["Media", "Dev. std", "Mediana", "Q1", "Q3", "Min", "Max"]
-    out[num_cols_fmt] = out[num_cols_fmt].astype(float).round(dec)
-    out["% Missing"] = out["% Missing"].astype(float).round(perc_dec)
-    return out
-
-def style_df(df_in: pd.DataFrame):
-    sty = (
-        df_in.style
-        .format(precision=dec, na_rep="—")
-        .set_properties(**{"text-align": "right"})
-        .set_table_styles([{"selector": "th", "props": "text-align: left;"}])
-    )
-    highlight_cols = [c for c in df_in.columns if c in {"Media", "Mediana"}]
-    if highlight_cols:
-        sty = sty.set_properties(subset=highlight_cols, **{"font-weight": "600"})
-    return sty
-
-if simple_view:
-    cont_simple = format_continuous_simple(cont_summary)
-    st.dataframe(style_df(cont_simple), use_container_width=True)
-    st.download_button(
-        "Scarica CSV (continue — vista semplice)",
-        cont_simple.to_csv(index=False).encode("utf-8"),
-        file_name="descriptive_continuous_simple.csv"
-    )
-else:
-    st.dataframe(cont_summary, use_container_width=True)
-    st.download_button(
-        "Scarica CSV (continue — dettagliata)",
-        cont_summary.to_csv(index=False).encode("utf-8"),
-        file_name="descriptive_continuous_detailed.csv"
-    )
-
-with st.expander("Come leggere la tabella continua (breve guida)", expanded=False):
-    st.markdown(f"""
-- **N**: numero di valori non mancanti. **% Missing**: percentuale di mancanti.
-- **Media** e **Dev. std**: centratura e dispersione (arrotondate a {dec} decimali).
-- **Mediana** e **Q1/Q3**: misure robuste.
-- **Min/Max**: estremi osservati.
-""")
-
-with st.expander("Dettagli tecnici (outlier/trasformazioni)", expanded=False):
-    st.dataframe(
-        cont_summary[["variable", "n_used", "n_outliers", "transform", "shift", "boxcox_lambda"]]
-        .rename(columns={
-            "variable": "Variabile",
-            "n_used": "N (usati)",
-            "n_outliers": "Outlier esclusi",
-            "transform": "Trasformazione",
-            "shift": "Shift (se applicato)",
-            "boxcox_lambda": "λ Box-Cox"
-        }),
-        use_container_width=True
-    )
-
-if show_raw and transform != "Nessuna":
-    st.markdown("#### Confronto (senza trasformazioni, senza esclusione outlier)")
-    cont_raw, _ = compute_summaries_v2(df, tuple(num_cols), tuple(cat_cols), False, "Nessuna", cat_denominator)
-    cont_raw_simple = format_continuous_simple(cont_raw)
-    st.dataframe(style_df(cont_raw_simple), use_container_width=True)
-
-# -------------------------
-# Categoriche (distribuzioni complete)
-# -------------------------
-st.subheader("Risultati — Variabili categoriche")
-
-if cat_summary.empty:
-    st.info("Nessuna variabile categorica selezionata.")
-else:
-    st.dataframe(cat_summary, use_container_width=True)
-    st.download_button(
-        "Scarica CSV (categoriche — distribuzioni complete)",
-        cat_summary.to_csv(index=False).encode("utf-8"),
-        file_name="descriptive_categorical_full.csv"
-    )
-
-with st.expander("Come leggere la tabella categorica (breve guida)", expanded=False):
-    st.markdown("""
-- Ogni variabile è riportata con **tutte le sue categorie** (e una riga **(Missing)** se presenti valori mancanti).
-- **Frequenza**: conteggio delle osservazioni in ciascuna categoria.
-- **%**: percentuale calcolata sul **totale** della variabile (opzione *total*) oppure solo sui **valori non mancanti** (opzione *valid*).
-""")
-
-# -------------------------
-# Aggiunta al Results Summary
-# -------------------------
-st.divider()
-if st.button("➕ Aggiungi queste tabelle al Results Summary"):
-    # continua: vista semplice per report
-    cont_for_report = format_continuous_simple(cont_summary).to_dict(orient="records")
-    # categoriche: distribuzioni complete
-    cat_for_report = cat_summary.to_dict(orient="records")
-
-    st.session_state.report_items.append({
-        "type": "table",
-        "title": "Descrittive — Continue (Vista semplice)",
-        "data": cont_for_report
-    })
-    st.session_state.report_items.append({
-        "type": "table",
-        "title": "Descrittive — Categoriche (Distribuzioni complete)",
-        "data": cat_for_report
-    })
-    st.success("Tabelle aggiunte al Results Summary.")
-
-st.info("Suggerimento: prosegua con **Explore Distributions** per i grafici e le verifiche di normalità.")
