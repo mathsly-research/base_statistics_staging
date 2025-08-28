@@ -54,7 +54,7 @@ ss_set_default(k("active_filter"), None)
 st.title("📈 Analisi Longitudinale – Misure ripetute")
 st.markdown(
     """
-**Obiettivo:** portare i dati nel **formato long** (una riga per *Soggetto × Tempo*) con tre colonne:
+**Primo step necessario:** portare i dati nel **formato long** (una riga per *Soggetto × Tempo*) con tre colonne:
 1) **ID soggetto** · 2) **Tempo/Visita** · 3) **Valore (esito)**.
 """
 )
