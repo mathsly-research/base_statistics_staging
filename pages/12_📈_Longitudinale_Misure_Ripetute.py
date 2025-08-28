@@ -5,175 +5,332 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-# Opzionali: attivi funzioni avanzate (grafici/LMEM)
+# Opzionali
 try:
     import plotly.express as px
 except Exception:
     px = None
-
 try:
     import statsmodels.formula.api as smf
+    import statsmodels.api as sm
 except Exception:
     smf = None
+    sm = None
 
-# -----------------------------------------
-# Config pagina
-# -----------------------------------------
 st.set_page_config(page_title="Longitudinale · Misure ripetute", layout="wide")
 
-# -----------------------------------------
-# Utility per chiavi univoche
-# -----------------------------------------
-KEY_PREFIX = "lr"  # lr = longitudinal repeated
+# ------------------------------
+# Utility chiavi univoche
+# ------------------------------
+KEY_PREFIX = "lr"
 
 def k(name: str) -> str:
-    """Genera una chiave univoca con prefisso di pagina."""
     return f"{KEY_PREFIX}_{name}"
 
 def k_sec(section: str, name: str) -> str:
-    """Chiave univoca per widget 'simili' ripetuti in sezioni/tab diverse."""
     return f"{KEY_PREFIX}_{section}_{name}"
 
-# -----------------------------------------
-# Guard di inizializzazione stato
-# -----------------------------------------
+# ------------------------------
+# Stato iniziale
+# ------------------------------
 if k("initialized") not in st.session_state:
     st.session_state[k("initialized")] = True
     st.session_state[k("id_col")] = None
     st.session_state[k("time_col")] = None
     st.session_state[k("value_col")] = None
-    st.session_state[k("is_long_format")] = True  # assunzione iniziale
-    st.session_state[k("filter_enabled")] = False
+    st.session_state[k("work_df")] = None
+    st.session_state[k("format_ok")] = False
+    st.session_state[k("active_filter")] = None
 
-# -----------------------------------------
-# Header
-# -----------------------------------------
 st.title("📈 Analisi Longitudinale / Misure ripetute")
 
 st.markdown(
     """
-Questa pagina consente di configurare un dataset longitudinale (ID soggetto, tempo/misura, variabile di esito), 
-visualizzare grafici descrittivi e avviare modelli statistici di base.  
-Le chiavi dei widget sono **tutte esplicite e univoche** per prevenire `StreamlitDuplicateElementId`.
+**Formato richiesto (long):** il dataset deve contenere **una riga per soggetto e tempo**, con tre campi:
+- **ID soggetto** (identificativo univoco del soggetto),
+- **Tempo/Visita** (ordine o etichetta della misura ripetuta, numerica o categoriale ordinata),
+- **Variabile di esito** (valore misurato).
+
+Se i dati non sono in questo formato (ad es. **wide**, con più colonne una per ciascun tempo), può usare gli **strumenti di preparazione** sottostanti per convertirli.
 """
 )
 
-# -----------------------------------------
-# Caricamento dati
-# -----------------------------------------
-with st.expander("1) Carica dati", expanded=True):
-    file = st.file_uploader(
-        "Carica un file CSV o Excel",
-        type=["csv", "xlsx", "xls"],
-        key=k("uploader"),
-        help="Il file dovrebbe contenere almeno colonne per ID soggetto, tempo e variabile di esito."
-    )
-
-    df: pd.DataFrame | None = None
-    if file is not None:
-        try:
-            if file.name.lower().endswith(".csv"):
-                df = pd.read_csv(file)
-            else:
-                df = pd.read_excel(file)
-        except Exception as e:
-            st.error(f"Errore nel caricamento: {e}")
+# ------------------------------------------------
+# 1) Recupero dataset dalla pagina di upload (0_📂)
+# ------------------------------------------------
+with st.expander("1) Origine dati", expanded=True):
+    st.caption("La pagina prova a recuperare automaticamente i dati caricati nella pagina **0_📂 Upload Dataset**.")
+    possible_keys = ["uploaded_df", "df_upload", "main_df", "dataset", "df"]
+    df = None
+    found_key = None
+    for key in possible_keys:
+        if key in st.session_state and isinstance(st.session_state[key], pd.DataFrame):
+            df = st.session_state[key]
+            found_key = key
+            break
 
     if df is not None:
-        st.success(f"Dati caricati: {df.shape[0]} righe × {df.shape[1]} colonne")
+        st.success(f"Dati trovati in `st.session_state['{found_key}']`: {df.shape[0]} righe × {df.shape[1]} colonne.")
         st.dataframe(df.head(20), use_container_width=True)
     else:
-        st.info("Carichi i dati per procedere.")
+        st.warning("Nessun dataset trovato nelle chiavi attese di `st.session_state`.")
+        st.info("Come alternativa, carichi qui temporaneamente un file per test (CSV/Excel).")
+        temp_file = st.file_uploader("Carica CSV/XLSX (opzionale, per test)", type=["csv", "xlsx", "xls"], key=k("temp_uploader"))
+        if temp_file is not None:
+            try:
+                if temp_file.name.lower().endswith(".csv"):
+                    df = pd.read_csv(temp_file)
+                else:
+                    df = pd.read_excel(temp_file)
+                st.success(f"Caricato file di test: {df.shape[0]} × {df.shape[1]}")
+                st.dataframe(df.head(20), use_container_width=True)
+            except Exception as e:
+                st.error(f"Errore caricamento file di test: {e}")
 
-# -----------------------------------------
-# Configurazione colonne (ID, tempo, outcome)
-# -----------------------------------------
-if df is not None and not df.empty:
-    with st.expander("2) Configurazione struttura dati", expanded=True):
+if df is None or df.empty:
+    st.stop()
 
-        st.radio(
-            "Formato del dataset",
-            options=["Lungo (long)", "Largo (wide)"],
-            index=0 if st.session_state[k("is_long_format")] else 1,
-            key=k("format_radio"),
-            help="In formato long: colonne = ID, Tempo, Valore. In formato wide: una colonna ID e più colonne di tempo/misura.",
+# ------------------------------
+# 2) Verifica formato
+# ------------------------------
+with st.expander("2) Verifica formato richiesto (long)", expanded=True):
+    cols = list(df.columns)
+    st.write("Colonne disponibili:", cols)
+
+    # Proviamo ad indovinare colonne candidate
+    guess_id = None
+    guess_time = None
+    guess_val = None
+
+    # Heuristiche semplici
+    for c in cols:
+        cl = c.lower()
+        if guess_id is None and any(tok in cl for tok in ["id", "soggetto", "subject", "patient", "pt", "case"]):
+            guess_id = c
+        if guess_time is None and any(tok in cl for tok in ["time", "tempo", "visit", "visita", "giorno", "day", "t"]):
+            guess_time = c
+        if guess_val is None and any(tok in cl for tok in ["val", "value", "esito", "outcome", "y", "score", "measure"]):
+            guess_val = c
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        sel_id = st.selectbox("Seleziona colonna ID soggetto", options=cols, index=(cols.index(guess_id) if guess_id in cols else 0), key=k("sel_id_try"))
+    with c2:
+        sel_time = st.selectbox("Seleziona colonna Tempo/Visita", options=cols, index=(cols.index(guess_time) if guess_time in cols else min(1, len(cols)-1)), key=k("sel_time_try"))
+    with c3:
+        sel_val = st.selectbox("Seleziona colonna Variabile di esito", options=cols, index=(cols.index(guess_val) if guess_val in cols else min(2, len(cols)-1)), key=k("sel_val_try"))
+
+    # Criterio: se le tre colonne selezionate sono distinte e la distribuzione per (ID,Tempo) è 1 riga
+    long_candidate = False
+    if len({sel_id, sel_time, sel_val}) == 3:
+        grp = df[[sel_id, sel_time]].value_counts()
+        long_candidate = (grp.max() == 1)
+
+    if long_candidate:
+        st.success("Il dataset **sembra già in formato long** adatto alle analisi.")
+        st.session_state[k("id_col")] = sel_id
+        st.session_state[k("time_col")] = sel_time
+        st.session_state[k("value_col")] = sel_val
+        st.session_state[k("work_df")] = df[[sel_id, sel_time, sel_val]].copy()
+        st.session_state[k("format_ok")] = True
+    else:
+        st.warning("Il dataset **non è in formato long** oppure presenta più righe per la stessa coppia (ID, Tempo). Usi gli strumenti di preparazione di seguito.")
+
+# ---------------------------------------------------------
+# 3) Strumenti per mettere nel formato corretto (prep tool)
+# ---------------------------------------------------------
+with st.expander("3) Strumenti di preparazione dati (wide → long / rinomina colonne)", expanded=not st.session_state[k("format_ok")]):
+    st.markdown("**Scegli un percorso di preparazione:**")
+    prep_mode = st.radio(
+        "Modalità",
+        options=[
+            "A) Il mio dataset è LONG ma con nomi colonne diversi → seleziona/ri-nomina",
+            "B) Il mio dataset è WIDE (una colonna per ciascun tempo) → converti in LONG",
+        ],
+        key=k("prep_mode"),
+        index=(0 if st.session_state[k("format_ok")] else 1),
+    )
+
+    if prep_mode.startswith("A)"):
+        st.info("Selezioni le colonne corrispondenti a ID, Tempo, Valore. Il sistema creerà un dataframe standardizzato.")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            id_col_a = st.selectbox("Colonna ID", options=cols, key=k("A_id"))
+        with c2:
+            time_col_a = st.selectbox("Colonna Tempo/Visita", options=cols, key=k("A_time"))
+        with c3:
+            value_col_a = st.selectbox("Colonna Valore", options=cols, key=k("A_val"))
+
+        cast_time = st.checkbox("Converti Tempo in numerico se possibile", value=False, key=k("A_cast_time"))
+        drop_na = st.checkbox("Elimina righe con NA in ID/Tempo/Valore", value=True, key=k("A_drop_na"))
+        dedup = st.selectbox("Se esistono duplicati (ID,Tempo) come gestirli?", options=["Mantieni prima occorrenza", "Media per duplicati"], key=k("A_dedup"))
+
+        if st.button("Crea dataset LONG standardizzato", key=k("A_run"), use_container_width=True):
+            try:
+                work = df[[id_col_a, time_col_a, value_col_a]].copy()
+                work.columns = ["__ID__", "__Tempo__", "__Valore__"]
+
+                if cast_time:
+                    as_num = pd.to_numeric(work["__Tempo__"], errors="coerce")
+                    if not as_num.isna().all():
+                        work["__Tempo__"] = as_num
+
+                if drop_na:
+                    work = work.dropna(subset=["__ID__", "__Tempo__", "__Valore__"])
+
+                # gestisci duplicati su (ID,Tempo)
+                if dedup == "Media per duplicati":
+                    work = (work
+                            .groupby(["__ID__", "__Tempo__"], as_index=False)
+                            .agg(__Valore__=("__Valore__", "mean")))
+                else:
+                    work = work.drop_duplicates(subset=["__ID__", "__Tempo__"], keep="first")
+
+                st.success("Creato dataset LONG standardizzato.")
+                st.dataframe(work.head(20), use_container_width=True)
+
+                # salva stato
+                st.session_state[k("work_df")] = work.rename(columns={"__ID__": id_col_a, "__Tempo__": time_col_a, "__Valore__": value_col_a})
+                st.session_state[k("id_col")] = id_col_a
+                st.session_state[k("time_col")] = time_col_a
+                st.session_state[k("value_col")] = value_col_a
+                st.session_state[k("format_ok")] = True
+            except Exception as e:
+                st.error(f"Errore nella standardizzazione LONG: {e}")
+
+    else:  # B) WIDE -> LONG
+        st.info(
+            "Se il dataset è in **wide** (una colonna per ciascun tempo/visita), selezioni la colonna ID e le colonne delle misure. "
+            "Il sistema eseguirà un `melt()` per ottenere il formato long."
         )
-        st.session_state[k("is_long_format")] = (st.session_state[k("format_radio")] == "Lungo (long)")
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            id_col_b = st.selectbox("Colonna ID", options=cols, key=k("B_id"))
+        with c2:
+            time_like = [c for c in cols if c != id_col_b]
+            time_cols_b = st.multiselect(
+                "Colonne di misura (tempi/visite)",
+                options=time_like,
+                default=time_like[: min(5, len(time_like))],
+                key=k("B_time_cols"),
+            )
 
-        # -- Selettori principali, unici nella pagina (non replicati in altri tab) --
-        if st.session_state[k("is_long_format")]:
-            cols = st.columns(3)
-            with cols[0]:
-                st.session_state[k("id_col")] = st.selectbox(
-                    "ID soggetto",
-                    options=list(df.columns),
-                    index=0,
-                    key=k("id_col_select"),
-                )
-            with cols[1]:
-                st.session_state[k("time_col")] = st.selectbox(
-                    "Tempo / Visita",
-                    options=list(df.columns),
-                    index=min(1, len(df.columns)-1),
-                    key=k("time_col_select"),
-                )
-            with cols[2]:
-                st.session_state[k("value_col")] = st.selectbox(
-                    "Variabile di esito",
-                    options=list(df.columns),
-                    index=min(2, len(df.columns)-1),
-                    key=k("value_col_select"),
-                )
-        else:
-            # Formato largo: si seleziona ID e le colonne di misure ripetute
-            cols = st.columns([1, 2])
-            with cols[0]:
-                st.session_state[k("id_col")] = st.selectbox(
-                    "ID soggetto",
-                    options=list(df.columns),
-                    key=k("id_col_wide"),
-                )
-            with cols[1]:
-                time_like = [c for c in df.columns if c != st.session_state[k("id_col")]]
-                time_cols_sel = st.multiselect(
-                    "Colonne delle misure (tempi/visite)",
-                    options=time_like,
-                    default=time_like[:min(3, len(time_like))],
-                    key=k("time_cols_wide"),
-                )
-            # Melt in long per analisi successive
-            if st.session_state.get(k("id_col")) and time_cols_sel:
+        st.markdown("**Estrazione etichette Tempo dalle intestazioni delle colonne wide**")
+        t1, t2 = st.columns(2)
+        with t1:
+            strip_prefix = st.text_input("Rimuovi prefisso (opzionale, es. 'T')", value="", key=k("B_strip_prefix"))
+        with t2:
+            to_numeric = st.checkbox("Converte etichetta Tempo in numerico se possibile", value=True, key=k("B_to_numeric"))
+
+        drop_na_b = st.checkbox("Elimina righe con NA in ID/Tempo/Valore", value=True, key=k("B_drop_na"))
+        dedup_b = st.selectbox("Se esistono duplicati (ID,Tempo)", options=["Mantieni prima occorrenza", "Media per duplicati"], key=k("B_dedup"))
+
+        if st.button("Converte WIDE → LONG", key=k("B_run"), use_container_width=True):
+            if not time_cols_b:
+                st.error("Selezioni almeno una colonna di misura.")
+            else:
                 try:
-                    df = df.melt(
-                        id_vars=[st.session_state[k("id_col")]],
-                        value_vars=time_cols_sel,
-                        var_name="__tempo__",
-                        value_name="__valore__",
+                    work = df.melt(
+                        id_vars=[id_col_b],
+                        value_vars=time_cols_b,
+                        var_name="__Tempo__",
+                        value_name="__Valore__",
                     )
-                    st.session_state[k("time_col")] = "__tempo__"
-                    st.session_state[k("value_col")] = "__valore__"
-                    st.success("Il dataset è stato convertito in formato long per le analisi successive.")
-                    st.dataframe(df.head(20), use_container_width=True)
+                    # Rimozione prefisso
+                    if strip_prefix:
+                        work["__Tempo__"] = work["__Tempo__"].astype(str).str.replace(f"^{strip_prefix}", "", regex=True)
+
+                    # Numerico se richiesto
+                    if to_numeric:
+                        as_num = pd.to_numeric(work["__Tempo__"], errors="coerce")
+                        if not as_num.isna().all():
+                            work["__Tempo__"] = as_num
+
+                    if drop_na_b:
+                        work = work.dropna(subset=[id_col_b, "__Tempo__", "__Valore__"])
+
+                    # Dedup
+                    if dedup_b == "Media per duplicati":
+                        work = (work
+                                .groupby([id_col_b, "__Tempo__"], as_index=False)
+                                .agg(__Valore__=("__Valore__", "mean")))
+                    else:
+                        work = work.drop_duplicates(subset=[id_col_b, "__Tempo__"], keep="first")
+
+                    # Salva stato con nomi standard scelti
+                    st.session_state[k("work_df")] = work.rename(columns={id_col_b: "__ID__", "__Tempo__": "__Tempo__", "__Valore__": "__Valore__"})
+                    st.session_state[k("id_col")] = "__ID__"
+                    st.session_state[k("time_col")] = "__Tempo__"
+                    st.session_state[k("value_col")] = "__Valore__"
+                    st.session_state[k("format_ok")] = True
+
+                    st.success("Conversione **WIDE → LONG** completata.")
+                    st.dataframe(st.session_state[k("work_df")].head(20), use_container_width=True)
                 except Exception as e:
-                    st.error(f"Errore nel reshape (wide→long): {e}")
+                    st.error(f"Errore nella conversione wide→long: {e}")
 
-        # Validazione
-        id_ok = st.session_state.get(k("id_col")) in (df.columns if df is not None else [])
-        time_ok = st.session_state.get(k("time_col")) in (df.columns if df is not None else [])
-        val_ok = st.session_state.get(k("value_col")) in (df.columns if df is not None else [])
-        if not (id_ok and time_ok and val_ok):
-            st.warning("Selezioni non ancora complete o non valide.")
-        else:
-            st.success(f"Configurazione OK → ID = `{st.session_state[k('id_col')]}`, "
-                       f"Tempo = `{st.session_state[k('time_col')]}`, "
-                       f"Esito = `{st.session_state[k('value_col')]}`")
+# ------------------------------------------------
+# 4) Controlli qualità e tipizzazione del Tempo
+# ------------------------------------------------
+if st.session_state[k("format_ok")] and st.session_state[k("work_df")] is not None:
+    with st.expander("4) Controlli qualità (duplicati, missing) e tipizzazione del Tempo", expanded=True):
+        work = st.session_state[k("work_df")].copy()
+        id_col = st.session_state[k("id_col")]
+        time_col = st.session_state[k("time_col")]
+        val_col = st.session_state[k("value_col")]
 
-# -----------------------------------------
-# Tabs principali
-# -----------------------------------------
-if df is not None and not df.empty and all(
-    st.session_state.get(k(x)) in df.columns for x in ["id_col", "time_col", "value_col"]
-):
+        st.write(f"Colonne attive → **ID:** `{id_col}` · **Tempo:** `{time_col}` · **Valore:** `{val_col}`")
+        st.write("Dimensioni:", work.shape)
+        st.dataframe(work.head(20), use_container_width=True)
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            handle_missing = st.selectbox("Missing in Valore", ["Nessuna azione", "Drop righe NA"], key=k("QC_missing"))
+        with c2:
+            time_type = st.selectbox("Tipo Tempo", ["Auto", "Numerico", "Categoriale ordinato"], key=k("QC_ttype"))
+        with c3:
+            sort_by_time = st.checkbox("Ordina per Tempo", value=True, key=k("QC_sort"))
+        with c4:
+            check_dups = st.checkbox("Raggruppa duplicati (ID,Tempo) con media", value=False, key=k("QC_dedup"))
+
+        if st.button("Applica controlli/trasformazioni", key=k("QC_apply"), use_container_width=True):
+            try:
+                if handle_missing == "Drop righe NA":
+                    work = work.dropna(subset=[id_col, time_col, val_col])
+
+                if time_type == "Numerico":
+                    as_num = pd.to_numeric(work[time_col], errors="coerce")
+                    if not as_num.isna().all():
+                        work[time_col] = as_num
+                    else:
+                        st.warning("Impossibile convertire completamente Tempo in numerico; lasciato invariato.")
+                elif time_type == "Categoriale ordinato":
+                    work[time_col] = pd.Categorical(work[time_col], ordered=True)
+
+                if check_dups:
+                    work = (work
+                            .groupby([id_col, time_col], as_index=False)
+                            .agg(**{val_col: (val_col, "mean")}))
+
+                if sort_by_time:
+                    try:
+                        work = work.sort_values(by=[id_col, time_col])
+                    except Exception:
+                        work = work.sort_values(by=[id_col])
+
+                st.session_state[k("work_df")] = work
+                st.success("Controlli/trasformazioni applicati.")
+                st.dataframe(work.head(30), use_container_width=True)
+            except Exception as e:
+                st.error(f"Errore durante i controlli qualità: {e}")
+
+# ------------------------------------------------
+# 5) Analisi: Grafici e Modelli (solo se formato OK)
+# ------------------------------------------------
+def get_work_df() -> pd.DataFrame | None:
+    return st.session_state.get(k("work_df"))
+
+if st.session_state[k("format_ok")] and get_work_df() is not None:
     tab_desc, tab_plot, tab_model = st.tabs(["Impostazioni & Filtri", "Grafici", "Modelli"])
 
     # ---------------------------
@@ -181,195 +338,133 @@ if df is not None and not df.empty and all(
     # ---------------------------
     with tab_desc:
         st.subheader("Impostazioni & Filtri")
-
+        work = get_work_df()
+        # Filtro opzionale su colonna categoriale
         with st.form(key=k_sec("tab1", "filters_form")):
-            st.checkbox(
-                "Attiva filtro per sottogruppi",
-                value=st.session_state.get(k("filter_enabled"), False),
-                key=k_sec("tab1", "filter_enabled"),
-            )
-
-            # Esempio: l'utente può scegliere una colonna categoriale per filtrare
-            cat_cols = [c for c in df.columns if df[c].dtype == "object" or str(df[c].dtype).startswith("category")]
-            if cat_cols and st.session_state[k_sec("tab1", "filter_enabled")]:
-                filt_col = st.selectbox(
-                    "Colonna categoriale per il filtro",
-                    options=cat_cols,
-                    key=k_sec("tab1", "filt_col"),
-                )
-                # valori possibili
-                vals = sorted(df[filt_col].dropna().unique().tolist())
-                sel_vals = st.multiselect(
-                    "Valori inclusi",
-                    options=vals,
-                    default=vals[:1],
-                    key=k_sec("tab1", "filt_vals"),
-                )
+            cat_cols = [c for c in work.columns if (work[c].dtype == "object" or str(work[c].dtype).startswith("category")) and c not in [st.session_state[k("id_col")], st.session_state[k("time_col")]]]
+            use_filter = st.checkbox("Attiva filtro su colonna categoriale", value=False, key=k_sec("tab1", "use_filter"))
+            if use_filter and cat_cols:
+                fcol = st.selectbox("Colonna categoriale", options=cat_cols, key=k_sec("tab1", "fcol"))
+                vals = sorted(work[fcol].dropna().unique().tolist())
+                fvals = st.multiselect("Valori inclusi", options=vals, default=vals[:1], key=k_sec("tab1", "fvals"))
             else:
-                filt_col, sel_vals = None, None
+                fcol, fvals = None, None
+            submitted = st.form_submit_button("Applica")
+        if submitted and use_filter and fcol and fvals:
+            st.session_state[k("active_filter")] = (fcol, fvals)
+        elif submitted:
+            st.session_state[k("active_filter")] = None
 
-            submitted = st.form_submit_button("Applica impostazioni", use_container_width=True)
-
-        # Applica filtro se richiesto
-        if submitted:
-            st.session_state[k("filter_enabled")] = st.session_state[k_sec("tab1", "filter_enabled")]
-            if st.session_state[k("filter_enabled")] and filt_col and sel_vals:
-                st.session_state[k("active_filter")] = (filt_col, sel_vals)
-            else:
-                st.session_state[k("active_filter")] = None
-
-        if st.session_state.get(k("active_filter")):
-            filt_col, sel_vals = st.session_state[k("active_filter")]
-            st.info(f"Filtro attivo: **{filt_col}** in {sel_vals}")
+        if st.session_state[k("active_filter")]:
+            fcol, fvals = st.session_state[k("active_filter")]
+            st.info(f"Filtro attivo: **{fcol}** in {fvals}")
         else:
             st.info("Nessun filtro attivo.")
 
-    # ---------------------------
-    # Funzione helper per ottenere df analizzabile (con filtro)
-    # ---------------------------
-    def get_work_df() -> pd.DataFrame:
-        work = df.copy()
-        if st.session_state.get(k("active_filter")):
-            col, vals = st.session_state[k("active_filter")]
-            work = work[work[col].isin(vals)]
-        return work
+    # helper filtro
+    def filtered_df(df_in: pd.DataFrame) -> pd.DataFrame:
+        if st.session_state[k("active_filter")]:
+            fcol, fvals = st.session_state[k("active_filter")]
+            return df_in[df_in[fcol].isin(fvals)]
+        return df_in
 
     # ---------------------------
     # TAB 2: Grafici
     # ---------------------------
     with tab_plot:
         st.subheader("Grafici descrittivi")
-        work = get_work_df()
-
-        # Parametri grafico (chiavi specifiche della tab)
-        with st.expander("Opzioni grafico", expanded=True):
-            agg_fun = st.selectbox(
-                "Aggregazione per tempo (linea media ± errore)",
-                options=["media", "mediana"],
-                key=k_sec("tab2", "agg_fun"),
-            )
-            show_ci = st.checkbox("Mostra intervallo (bootstrap semplice)", value=True, key=k_sec("tab2", "show_ci"))
-            max_ids = st.number_input("Mostra al massimo N soggetti (per linee individuali)", min_value=0, value=0, step=1, key=k_sec("tab2", "max_ids"))
-
+        work = filtered_df(get_work_df())
         id_col = st.session_state[k("id_col")]
         t_col = st.session_state[k("time_col")]
         y_col = st.session_state[k("value_col")]
 
-        # Prova conversione del tempo a ordinabile
-        t_vals = work[t_col]
-        if not np.issubdtype(t_vals.dtype, np.number):
-            # Tentativo di parsing numerico o categoriale ordinato
-            try:
-                work["__t__"] = pd.to_numeric(work[t_col], errors="coerce")
-                if work["__t__"].isna().all():
-                    work["__t__"] = pd.Categorical(work[t_col], ordered=True).codes
-            except Exception:
-                work["__t__"] = pd.Categorical(work[t_col], ordered=True).codes
-            t_plot = "__t__"
-        else:
-            t_plot = t_col
+        with st.expander("Opzioni grafico", expanded=True):
+            agg_fun = st.selectbox("Aggregazione per tempo", ["media", "mediana"], key=k_sec("tab2", "agg"))
+            show_ci = st.checkbox("Mostra intervallo ±1.96·SE (media)", value=True, key=k_sec("tab2", "ci"))
+            max_ids = st.number_input("Linee individuali: max N soggetti (0 = nessuna)", min_value=0, value=0, step=1, key=k_sec("tab2", "nids"))
 
-        # Linee individuali (facoltative)
-        if max_ids and max_ids > 0:
+        # Linee individuali
+        if max_ids and max_ids > 0 and px is not None:
             ids = work[id_col].dropna().unique().tolist()[:max_ids]
-            w_ind = work[work[id_col].isin(ids)]
-            if px is not None:
-                fig_ind = px.line(
-                    w_ind.sort_values(by=[id_col, t_plot]),
-                    x=t_plot,
-                    y=y_col,
-                    color=id_col,
-                    markers=True,
-                )
-                fig_ind.update_layout(height=450)
-                st.plotly_chart(fig_ind, use_container_width=True)
-            else:
-                st.warning("Plotly non disponibile: impossibile mostrare le linee individuali.")
+            w_ind = work[work[id_col].isin(ids)].copy()
+            # Forziamo ordinamento tempo
+            try:
+                w_ind = w_ind.sort_values(by=[id_col, t_col])
+            except Exception:
+                w_ind = w_ind.sort_values(by=[id_col])
+            fig_ind = px.line(w_ind, x=t_col, y=y_col, color=id_col, markers=True)
+            fig_ind.update_layout(height=420)
+            st.plotly_chart(fig_ind, use_container_width=True)
 
         # Aggregato per tempo
         if agg_fun == "media":
-            g = work.groupby(t_plot)[y_col].agg(["mean", "count", "std"]).reset_index()
+            g = work.groupby(t_col)[y_col].agg(["mean", "count", "std"]).reset_index()
             g.rename(columns={"mean": "media", "count": "n", "std": "sd"}, inplace=True)
             if show_ci:
                 se = g["sd"] / np.sqrt(np.maximum(g["n"], 1))
                 g["low"] = g["media"] - 1.96 * se
                 g["high"] = g["media"] + 1.96 * se
         else:
-            g = work.groupby(t_plot)[y_col].median().reset_index().rename(columns={y_col: "mediana"})
+            g = work.groupby(t_col)[y_col].median().reset_index().rename(columns={y_col: "mediana"})
 
         if px is not None:
             if agg_fun == "media":
-                fig = px.line(g, x=t_plot, y="media", markers=True)
+                fig = px.line(g, x=t_col, y="media", markers=True)
                 if show_ci and "low" in g.columns:
-                    fig.add_scatter(x=g[t_plot], y=g["low"], mode="lines", name="low", showlegend=False)
-                    fig.add_scatter(x=g[t_plot], y=g["high"], mode="lines", name="high", showlegend=False)
+                    fig.add_scatter(x=g[t_col], y=g["low"], mode="lines", name="low", showlegend=False)
+                    fig.add_scatter(x=g[t_col], y=g["high"], mode="lines", name="high", showlegend=False)
             else:
-                fig = px.line(g, x=t_plot, y="mediana", markers=True)
-            fig.update_layout(height=480)
+                fig = px.line(g, x=t_col, y="mediana", markers=True)
+            fig.update_layout(height=460)
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.warning("Plotly non disponibile: impossibile mostrare il grafico aggregato.")
+            st.warning("Plotly non disponibile nell'ambiente.")
 
     # ---------------------------
-    # TAB 3: Modelli
+    # TAB 3: Modelli (dimostrativi)
     # ---------------------------
     with tab_model:
         st.subheader("Modelli statistici (dimostrativi)")
-
-        if smf is None:
-            st.warning("`statsmodels` non è disponibile nell'ambiente: saltiamo l'analisi dei modelli.")
+        if smf is None or sm is None:
+            st.warning("`statsmodels` non è disponibile: impossibile eseguire i modelli.")
         else:
-            work = get_work_df()
-
-            # Opzioni modello (chiavi specifiche della tab)
-            with st.form(key=k_sec("tab3", "model_form")):
-                model_type = st.selectbox(
-                    "Tipo di modello",
-                    options=["ANOVA per misure ripetute (semplificata)", "LM (random intercept ~ soggetto)"],
-                    key=k_sec("tab3", "model_type"),
-                )
-                submit_model = st.form_submit_button("Esegui modello", use_container_width=True)
-
+            work = filtered_df(get_work_df())[[st.session_state[k("id_col")], st.session_state[k("time_col")], st.session_state[k("value_col")]]].dropna().copy()
             id_col = st.session_state[k("id_col")]
             t_col = st.session_state[k("time_col")]
             y_col = st.session_state[k("value_col")]
 
-            if submit_model:
-                # Preparazione dati
-                data_m = work[[id_col, t_col, y_col]].dropna().copy()
+            with st.form(key=k_sec("tab3", "form")):
+                model_type = st.selectbox(
+                    "Tipo di modello",
+                    ["ANOVA per misure ripetute (semplificata)", "LM con random intercept (MixedLM)"],
+                    key=k_sec("tab3", "mtype")
+                )
+                submit = st.form_submit_button("Esegui modello", use_container_width=True)
 
-                # Prova a trattare il tempo come categoriale
-                data_m[t_col] = data_m[t_col].astype("category")
-
+            if submit:
                 try:
-                    if model_type == "ANOVA per misure ripetute (semplificata)":
-                        # Approccio semplice: OLS con tempo categoriale + cluster-robust SE per soggetto
+                    work[t_col] = work[t_col].astype("category")
+                    if model_type.startswith("ANOVA"):
                         formula = f"`{y_col}` ~ C(`{t_col}`)"
-                        model = smf.ols(formula=formula, data=data_m).fit(
-                            cov_type="cluster",
-                            cov_kwds={"groups": data_m[id_col]}
-                        )
+                        fit = smf.ols(formula=formula, data=work).fit(cov_type="cluster", cov_kwds={"groups": work[id_col]})
                         st.write("**Formula:**", formula)
-                        st.write(model.summary().as_text())
+                        st.text(fit.summary().as_text())
                     else:
-                        # LM con random intercept via mixedlm
-                        import statsmodels.api as sm
                         formula = f"`{y_col}` ~ C(`{t_col}`)"
-                        md = sm.MixedLM.from_formula(
-                            formula, data=data_m, groups=data_m[id_col]
-                        )
+                        md = sm.MixedLM.from_formula(formula, data=work, groups=work[id_col])
                         mdf = md.fit(method="lbfgs", reml=True)
                         st.write("**Formula:**", formula + " + (1|ID)")
-                        st.write(mdf.summary().as_text())
+                        st.text(mdf.summary().as_text())
                 except Exception as e:
                     st.error(f"Errore nel fitting del modello: {e}")
 
-# -----------------------------------------
+# ------------------------------
 # Footer tecnico
-# -----------------------------------------
+# ------------------------------
 with st.expander("Dettagli tecnici", expanded=False):
     st.caption(
-        "Tutti i widget usano chiavi esplicite con prefisso `lr_` (o `lr_<tab>_...`) per prevenire "
-        "`StreamlitDuplicateElementId`. Le scelte primarie (ID, Tempo, Esito) sono dichiarate una sola volta "
-        "e memorizzate in `st.session_state`, poi riutilizzate nelle tab per evitare la ricreazione dello stesso widget."
+        "• Le chiavi di tutti i widget sono esplicite con prefisso `lr_` per prevenire `StreamlitDuplicateElementId`.\n"
+        "• I dati vengono recuperati da più chiavi possibili in `st.session_state` impostate dalla pagina di upload.\n"
+        "• Se il dataset è in wide, lo strumento esegue un `melt()` con opzioni per ripulire etichette del tempo, tipizzare e gestire duplicati.\n"
+        "• Se il dataset è già long ma con nomi diversi, è possibile selezionare/ri-nominare le colonne e standardizzare."
     )
