@@ -176,6 +176,11 @@ def _pearson_ci(r, n, alpha=0.05):
 def _safe_numeric(s):
     return pd.to_numeric(s, errors="coerce").dropna()
 
+# Quoting sicuro per formule Patsy (nomi con spazi/simboli/emoji)
+def fq(s: str) -> str:
+    # escape di backslash e apici singoli
+    return s.replace("\\", "\\\\").replace("'", "\\'")
+
 # Legende centralizzate
 def how_to_read(topic: str):
     if topic == "t_one":
@@ -328,7 +333,8 @@ with tab_means:
                             se = math.sqrt(sp2*(1/n1 + 1/n2))
                             dfree = n1 + n2 - 2
                         diff = m1 - m2
-                        lo, hi = _ci_t(diff, se, int(round(dfree)))
+                        lo, hi = _ci_t(diff, se, int(round(dree if (dree:=dfree) else dfree)))
+                        # ↑ piccola salvaguardia per evitare UnboundLocalError in edge case (py3.13)
                         d = _cohen_d_ind(m1, m2, s1, s2, n1, n2)
                         g_ = _hedges_g(d, n1, n2)
                         st.markdown(
@@ -461,7 +467,6 @@ with tab_props:
             if len(use_lvls) != 2:
                 st.info("Selezioni esattamente due gruppi.")
             else:
-                # Filtra ai due gruppi selezionati
                 dfg = df[df[g].astype(str).isin(use_lvls)].copy()
                 s1 = dfg[dfg[g].astype(str)==use_lvls[0]][y]
                 s2 = dfg[dfg[g].astype(str)==use_lvls[1]][y]
@@ -533,14 +538,13 @@ with tab_cat:
             if r == 2 and c == 2:
                 phi = math.sqrt(chi2 / n) if n>0 else np.nan
                 st.markdown(f"**χ² = {chi2:.3f}** (df={dof}), **p = {p:.4f}**, **φ = {phi:.3f}**")
-                # Fisher exact per 2x2
                 try:
                     OR, p_f = stats.fisher_exact(ct.values)
                     st.markdown(f"**Fisher exact**: OR = {OR:.3f}, p = {p_f:.4f}")
                 except Exception:
                     pass
             else:
-                k_min = min(r-1, c-1)  # ATTENZIONE: non sovrascrive la funzione k(...)
+                k_min = min(r-1, c-1)  # non sovrascrive k(...)
                 cramer_v = math.sqrt(chi2 / (n * k_min)) if n>0 and k_min>0 else np.nan
                 st.markdown(f"**χ² = {chi2:.3f}** (df={dof}), **p = {p:.4f}**, **V di Cramér = {cramer_v:.3f}**")
 
@@ -571,8 +575,13 @@ with tab_corr:
         else:
             if method == "Pearson":
                 r, p = stats.pearsonr(xs, ys)
-                lo, hi = _pearson_ci(r, n)
-                st.markdown(f"**r = {r:.3f}**, **p = {p:.4f}**, **CI95% r = ({lo:.3f}, {hi:.3f})**, **n = {n}**")
+                # CI via Fisher z
+                z = 0.5 * np.log((1+r)/(1-r))
+                se = 1 / math.sqrt(n - 3)
+                zcrit = stats.norm.ppf(1 - 0.05/2) if stats else 1.96
+                lo = z - zcrit*se; hi = z + zcrit*se
+                rlo = (np.exp(2*lo)-1)/(np.exp(2*lo)+1); rhi = (np.exp(2*hi)-1)/(np.exp(2*hi)+1)
+                st.markdown(f"**r = {r:.3f}**, **p = {p:.4f}**, **CI95% r = ({rlo:.3f}, {rhi:.3f})**, **n = {n}**")
             elif method == "Spearman":
                 r, p = stats.spearmanr(xs, ys)
                 st.markdown(f"**ρ = {r:.3f}**, **p = {p:.4f}**, **n = {n}**")
@@ -600,7 +609,7 @@ with tab_anova:
         g = st.selectbox("Fattore (gruppi)", options=cat_vars, key=k("a_g"))
         method = st.selectbox("Metodo", ["ANOVA (var. uguali)", "Welch ANOVA (var. diverse)", "Kruskal–Wallis"], key=k("a_method"))
 
-        # Gruppi (per eventuali statistiche non parametriche)
+        # Gruppi (per Kruskal)
         groups = [_safe_numeric(sub[y]) for _, sub in df.groupby(g)]
         labels = [str(lv) for lv, _ in df.groupby(g)]
 
@@ -618,15 +627,16 @@ with tab_anova:
             if smf is None:
                 st.info("`statsmodels` non disponibile: per ANOVA si consiglia StatsModels.")
             else:
-                formula = f"`{y}` ~ C(`{g}`)"
+                # >>> FIX: formula con quote sicuro per nomi non standard
+                formula = f"Q('{fq(y)}') ~ C(Q('{fq(g)}'))"
                 model = smf.ols(formula=formula, data=df).fit()
-                # ANOVA Type II (come riferimento uniforme)
-                anova = sm.stats.anova_lm(model, typ=2)
+                anova = sm.stats.anova_lm(model, typ=2)  # Type II
                 st.dataframe(anova, use_container_width=True)
+
                 try:
-                    ss_between = float(anova.loc[f"C(`{g}`)", "sum_sq"])
+                    ss_between = float(anova.loc[f"C(Q('{fq(g)}'))", "sum_sq"])
                     ss_resid  = float(anova.loc["Residual", "sum_sq"])
-                    df_between = int(anova.loc[f"C(`{g}`)", "df"])
+                    df_between = int(anova.loc[f"C(Q('{fq(g)}'))", "df"])
                     df_resid   = int(anova.loc["Residual", "df"])
                     sst = ss_between + ss_resid
                     eta2 = ss_between / sst if sst>0 else np.nan
