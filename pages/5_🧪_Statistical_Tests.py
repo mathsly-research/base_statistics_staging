@@ -63,7 +63,7 @@ except Exception:
 # ──────────────────────────────────────────────────────────────────────────────
 # Config pagina + nav
 # ──────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Test statistici", layout="wide")
+st.set_page_config(page_title="🧪 Test statistici", layout="wide")
 try:
     from nav import sidebar
     sidebar()
@@ -77,13 +77,42 @@ def k(name: str) -> str: return f"{KEY}_{name}"
 # Header
 # ──────────────────────────────────────────────────────────────────────────────
 st.title("🧪 Test statistici")
-st.caption("Esegua i test più comuni su medie, proporzioni, associazioni e correlazioni, con risultati interpretati.")
+st.caption("Esecuzione guidata dei test più comuni (medie, proporzioni, associazioni, correlazioni, ANOVA) con risultati interpretati.")
 
 ensure_initialized()
 df = get_active(required=True)
 
 with st.expander("Stato dati", expanded=False):
     stamp_meta()
+
+# Guida generale all'interpretazione
+with st.expander("📘 Guida rapida all’interpretazione", expanded=False):
+    st.markdown("""
+**p-value**  
+- Indica quanto sarebbero **estremi** (o più) i dati se H₀ fosse vera. **p < 0.05**: evidenza contro H₀.  
+- Non è la probabilità che H₀ sia vera.
+
+**Intervallo di confidenza (CI95%)**  
+- Gamma di valori compatibili con i dati. Se la CI95% **non** include 0 (o 1 per OR/proporzioni), l’effetto è statisticamente diverso da 0/1.  
+- Più è **stretta**, più la stima è precisa.
+
+**Dimensione dell’effetto (effect size)**  
+- Misura la **rilevanza** pratica:  
+  - **Cohen’s d**: ≈ 0.2 piccolo · 0.5 medio · 0.8 grande  
+  - **r / ρ / τ**: ≈ 0.1 piccolo · 0.3 medio · 0.5 grande  
+  - **φ / V di Cramér**: ≈ 0.1 piccolo · 0.3 medio · 0.5 grande *(soglie indicative)*  
+  - **η² / ω²**: quota di varianza spiegata (0→1)
+
+**Assunzioni & robustezza**  
+- T-test/ANOVA richiedono **indipendenza**, normalità (residui) e **omoscedasticità**; **Welch** è più robusto con varianze diseguali.  
+- Non parametrici (MW/Wilcoxon/Kruskal) testano differenze di **distribuzione/mediane**.
+
+**Campione e potenza**  
+- p non significativo **non** prova l’assenza di effetto; guardi **effect size** e **CI**.
+
+**Confronti multipli**  
+- Con molti test aumenta il rischio di falsi positivi: consideri correzioni (es. **Holm**, **BH/FDR**).
+""")
 
 # Liste variabili
 num_vars = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
@@ -102,13 +131,11 @@ def _ci_t(diff: float, se: float, dfree: int, alpha: float = 0.05):
     return diff - tcrit*se, diff + tcrit*se
 
 def _welch_df(s1, n1, s2, n2):
-    # df di Welch-Satterthwaite
     num = (s1/n1 + s2/n2)**2
-    den = ( (s1/n1)**2 / (n1-1) ) + ( (s2/n2)**2 / (n2-1) )
+    den = ((s1/n1)**2 / (n1-1)) + ((s2/n2)**2 / (n2-1))
     return num/den
 
 def _cohen_d_ind(mean1, mean2, sd1, sd2, n1, n2):
-    # Cohen's d per campioni indipendenti (pooled SD)
     if n1 < 2 or n2 < 2: return np.nan
     sp2 = ((n1-1)*sd1**2 + (n2-1)*sd2**2) / (n1+n2-2)
     sp = math.sqrt(sp2) if sp2 > 0 else np.nan
@@ -123,24 +150,20 @@ def _cohen_d_paired(diff_mean, diff_sd):
     return diff_mean / diff_sd if diff_sd and diff_sd > 0 else np.nan
 
 def _cliffs_delta(x, y):
-    # Effetto non parametrico per Mann-Whitney (Cliff's delta)
     x = np.asarray(x); y = np.asarray(y)
     n_x, n_y = len(x), len(y)
     if n_x == 0 or n_y == 0: return np.nan
-    # rank-biserial correlate: (wins - losses)/(n_x*n_y)
     total = 0
     for xi in x:
         total += np.sum(xi > y) - np.sum(xi < y)
     return total / (n_x * n_y)
 
 def _ranks_biserial_from_u(u, n1, n2):
-    # r_rb = 1 - 2U/(n1*n2)  (Mann–Whitney)
     return 1 - (2 * u) / (n1 * n2)
 
 def _pearson_ci(r, n, alpha=0.05):
     if n < 4 or r is None or np.isnan(r):
         return (np.nan, np.nan)
-    # Fisher z
     z = 0.5 * np.log((1+r)/(1-r))
     se = 1 / math.sqrt(n - 3)
     zcrit = stats.norm.ppf(1 - alpha/2) if stats else 1.96
@@ -152,6 +175,72 @@ def _pearson_ci(r, n, alpha=0.05):
 
 def _safe_numeric(s):
     return pd.to_numeric(s, errors="coerce").dropna()
+
+# Legende centralizzate
+def how_to_read(topic: str):
+    if topic == "t_one":
+        st.markdown("""
+**Scopo**: testare se la media differisce da un valore atteso (μ₀).  
+**Assunzioni**: indipendenza; normalità (oppure n grande → CLT).  
+**Cosa guardare**: **p-value**, **CI95% della differenza** (media−μ₀), **Cohen’s d**.  
+**Nota**: outlier/asimmetrie possono influenzare; valutare trasformazioni o bootstrap.
+""")
+    elif topic == "t_ind":
+        st.markdown("""
+**Scopo**: confronto tra **due medie indipendenti**.  
+**Assunzioni**: indipendenza; normalità entro gruppo; varianze uguali (Student) o disuguali (**Welch** consigliato).  
+**Cosa guardare**: **p-value**, **CI95% (A−B)**, **Cohen’s d / Hedges’ g**.  
+""")
+    elif topic == "t_paired":
+        st.markdown("""
+**Scopo**: confronto **prima/dopo** sugli **stessi** soggetti.  
+**Assunzioni**: normalità delle **differenze**.  
+**Cosa guardare**: **p-value**, **CI95% di Δ̄**, **Cohen’s dₚ** (sui differenziali).  
+""")
+    elif topic == "mw":
+        st.markdown("""
+**Scopo**: alternativa **non parametrica** al t a 2 campioni.  
+**Cosa testa**: differenze di **distribuzione/mediana** tra gruppi.  
+**Cosa guardare**: **U**, **p-value**, **rank-biserial r / Cliff’s δ**.  
+""")
+    elif topic == "wilcoxon":
+        st.markdown("""
+**Scopo**: alternativa **non parametrica** al t appaiato.  
+**Assunzioni**: differenze appaiate con distribuzione **simmetrica**.  
+**Cosa guardare**: **W**, **p-value**, **rank-biserial r**.  
+""")
+    elif topic == "prop_one":
+        st.markdown("""
+**Scopo**: verificare se una **proporzione** differisce da **p₀**.  
+**Cosa guardare**: **p̂**, **p-value z**, **CI95% (Wilson)**.  
+""")
+    elif topic == "prop_two":
+        st.markdown("""
+**Scopo**: confronto tra **due proporzioni** indipendenti.  
+**Cosa guardare**: **p̂₁, p̂₂**, **p-value z**, **CI95%** per ciascuna e per **(p̂₁−p̂₂)**.  
+""")
+    elif topic == "chi_fisher":
+        st.markdown("""
+**Scopo**: testare l’**associazione** tra due categoriali.  
+**Cosa guardare**: **χ²** (o **Fisher** in 2×2 con basse attese), **p-value**, **φ / V di Cramér** (intensità).  
+""")
+    elif topic == "corr":
+        st.markdown("""
+**Scopo**: forza/direzione relazione tra due **numeriche**.  
+**Pearson** (lineare), **Spearman** (monotona), **Kendall** (concordanza).  
+**Cosa guardare**: coefficiente, **p-value**, **CI95%** (Pearson via Fisher z).  
+""")
+    elif topic == "anova":
+        st.markdown("""
+**Scopo**: confronto tra ≥3 medie (un fattore).  
+**Cosa guardare**: **p** (F-test), **η² / ω²** (varianza spiegata).  
+**Alternative**: **Welch** (varianze disuguali), **Kruskal–Wallis** (non parametrico).  
+""")
+    elif topic == "tukey":
+        st.markdown("""
+**Scopo**: confronti multipli tra coppie dopo ANOVA.  
+**Cosa guardare**: per ogni coppia → **diff. media**, **CI95%**, **p-adj**; `reject=True` indica differenza significativa.  
+""")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Tabs principali
@@ -187,17 +276,13 @@ with tab_means:
                 diff = mean - mu0
                 ci_lo, ci_hi = _ci_t(diff, se, n-1)
 
-                d = _cohen_d_paired(diff, sd)  # in 1-campione è (mean - mu0)/sd
+                d = _cohen_d_paired(diff, sd)  # 1-campione: (mean - mu0)/sd
 
                 st.markdown(f"**n = {n}**, **media = {mean:.3f}**, **sd = {sd:.3f}**")
                 st.markdown(f"**t = {tstat:.3f}**, **p = {p:.4f}**, **diff = {diff:.3f}** (CI95%: {ci_lo:.3f} … {ci_hi:.3f}), **d = {d:.3f}**")
 
                 with st.expander("ℹ️ Come leggere"):
-                    st.markdown("""
-                    - Il **t-test a 1 campione** verifica se la media differisce da un valore atteso (μ₀).  
-                    - **p < 0.05** → evidenza contro H₀; la **CI95%** della differenza mostra l’ampiezza dell’effetto.  
-                    - **Cohen’s d** quantifica l’effetto (0.2 piccolo, 0.5 medio, 0.8 grande).
-                    """)
+                    how_to_read("t_one")
 
                 if px is not None:
                     fig = px.box(pd.DataFrame({x: s}), y=x, points="all", template="simple_white", title=f"{x}: distribuzione campionaria")
@@ -223,17 +308,13 @@ with tab_means:
                     st.info("Dati insufficienti o SciPy non disponibile.")
                 else:
                     if nonpar:
-                        # Mann–Whitney (two-sided)
                         res = stats.mannwhitneyu(a, b, alternative="two-sided")
                         u = res.statistic; p = res.pvalue
                         r_rb = _ranks_biserial_from_u(u, n1, n2)
                         cd = _cliffs_delta(a, b)
                         st.markdown(f"**Mann–Whitney U = {u:.1f}**, **p = {p:.4f}**, **rank-biserial r = {r_rb:.3f}**, **Cliff’s δ = {cd:.3f}**")
                         with st.expander("ℹ️ Come leggere"):
-                            st.markdown("""
-                            - **Mann–Whitney** confronta le distribuzioni senza assumere normalità.  
-                            - **p < 0.05** → differenza tra i gruppi. **r rank-biserial / Cliff’s δ** quantificano l’effetto.
-                            """)
+                            how_to_read("mw")
                     else:
                         res = stats.ttest_ind(a, b, equal_var=not welch, alternative="two-sided")
                         tstat, p = res.statistic, res.pvalue
@@ -255,11 +336,7 @@ with tab_means:
                             f"(CI95%: {lo:.3f} … {hi:.3f}); **d = {d:.3f}**, **Hedges’ g = {g_:.3f}**"
                         )
                         with st.expander("ℹ️ Come leggere"):
-                            st.markdown("""
-                            - **t-test** verifica differenza tra medie. **Welch** è robusto a varianze disuguali.  
-                            - **p < 0.05** → differenza significativa; **CI95%** della differenza quantifica l’ampiezza.  
-                            - **Cohen’s d / Hedges’ g** misurano l’effetto (0.2 piccolo, 0.5 medio, 0.8 grande).
-                            """)
+                            how_to_read("t_ind")
 
                     if px is not None:
                         plot_df = df[df[g].astype(str).isin(use_lvls)]
@@ -273,28 +350,21 @@ with tab_means:
             b = st.selectbox("Misura B (follow-up)", options=[c for c in num_vars if c != a], key=k("tp_b"))
             nonpar = st.checkbox("Alternativa non parametrica (Wilcoxon)", value=False, key=k("tp_wx"))
 
-            va = _safe_numeric(df[a]); vb = _safe_numeric(df[b])
-            n = min(len(va), len(vb))
-            if n < 2 or stats is None:
+            aligned = pd.DataFrame({a: df[a], b: df[b]}).dropna()
+            if aligned.shape[0] < 2 or stats is None:
                 st.info("Dati insufficienti o SciPy non disponibile.")
             else:
-                # allinea per indice comune
-                aligned = pd.DataFrame({a: df[a], b: df[b]}).dropna()
                 da = aligned[a].astype(float).values
                 db = aligned[b].astype(float).values
                 if nonpar:
                     res = stats.wilcoxon(da, db, alternative="two-sided", zero_method="wilcox")
                     W, p = res.statistic, res.pvalue
-                    # rank-biserial (paia): r = 1 - 2W/(n(n+1)/2)
                     n_pairs = len(da)
                     denom = n_pairs*(n_pairs+1)/2
                     r_rb = 1 - (2*W)/denom if denom > 0 else np.nan
                     st.markdown(f"**Wilcoxon W = {W:.1f}**, **p = {p:.4f}**, **rank-biserial r = {r_rb:.3f}**")
                     with st.expander("ℹ️ Come leggere"):
-                        st.markdown("""
-                        - **Wilcoxon** confronta due misure **appaiate** senza assumere normalità.  
-                        - **p < 0.05** → cambiamento tra A e B; **r** quantifica la grandezza dell’effetto.
-                        """)
+                        how_to_read("wilcoxon")
                 else:
                     res = stats.ttest_rel(da, db, alternative="two-sided")
                     tstat, p = res.statistic, res.pvalue
@@ -305,11 +375,7 @@ with tab_means:
                     dz = _cohen_d_paired(dbar, sd)
                     st.markdown(f"**t = {tstat:.3f}**, **p = {p:.4f}**, **Δ̄ = {dbar:.3f}** (CI95%: {lo:.3f} … {hi:.3f}), **dₚ = {dz:.3f}**")
                     with st.expander("ℹ️ Come leggere"):
-                        st.markdown("""
-                        - **t-test appaiato** valuta il cambiamento medio tra A e B sullo stesso soggetto.  
-                        - **p < 0.05** → cambiamento significativo; **CI95%** mostra l’entità media del cambiamento.  
-                        - **Cohen’s dₚ** misura l’effetto standardizzato sui **differenziali**.
-                        """)
+                        how_to_read("t_paired")
 
                 if px is not None:
                     plot_df = aligned.melt(value_vars=[a, b], var_name="Misura", value_name="Valore")
@@ -327,28 +393,23 @@ with tab_props:
     else:
         mode = st.radio("Selezioni il test", ["1 proporzione", "2 proporzioni (tra gruppi)"], horizontal=True, key=k("prop_mode"))
 
-        # Funzioni helper per conteggi successi
-        def _counts_from_var(var, success_label=None):
-            s = df[var]
-            if pd.api.types.is_numeric_dtype(s) and set(pd.unique(s.dropna())) <= {0,1}:
-                x = int((s == 1).sum()); n = int(s.notna().sum())
-                label = "1"
+        def _counts_from_var(series: pd.Series, success_label: str | None):
+            s = series
+            if pd.api.types.is_numeric_dtype(s) and set(pd.unique(s.dropna())) <= {0, 1}:
+                x = int((s == 1).sum()); n = int(s.notna().sum()); lab = "1"
             else:
                 s = s.astype(str)
-                levels = sorted(s.dropna().unique().tolist())
                 if success_label is None:
-                    return None, None, levels
-                x = int((s == success_label).sum()); n = int(s.notna().sum())
-                label = success_label
-            return x, n, label
+                    return None, None, sorted(s.dropna().unique().tolist())
+                x = int((s == success_label).sum()); n = int(s.notna().sum()); lab = success_label
+            return x, n, lab
 
         # ── 1 proporzione
         if mode == "1 proporzione":
             y = st.selectbox("Variabile binaria/categoriale", options=cat_vars + num_vars, key=k("p1_y"))
-            # se categoriale, serve selezionare "successo"
             s = df[y]
             succ_options = None
-            if not (pd.api.types.is_numeric_dtype(s) and set(pd.unique(s.dropna())) <= {0,1}):
+            if not (pd.api.types.is_numeric_dtype(s) and set(pd.unique(s.dropna())) <= {0, 1}):
                 succ_options = sorted(s.astype(str).dropna().unique().tolist())
                 success = st.selectbox("Categoria considerata 'successo'", options=succ_options, key=k("p1_succ"))
             else:
@@ -356,14 +417,13 @@ with tab_props:
             p0 = st.number_input("Proporzione attesa H₀ (p₀)", min_value=0.0, max_value=1.0, value=0.5, step=0.01, key=k("p1_p0"))
             alt = st.selectbox("Alternativa", ["two-sided", "smaller", "larger"], key=k("p1_alt"))
 
-            x, n, label = _counts_from_var(y, success)
+            x, n, label = _counts_from_var(s, success)
             if x is None:
                 st.info("Selezioni la modalità 'successo'.")
             else:
                 phat = x/n if n > 0 else np.nan
                 if proportions_ztest is not None:
                     stat, p = proportions_ztest(count=x, nobs=n, value=p0, alternative=alt)
-                    # CI Wilson
                     if proportion_confint is not None:
                         lo, hi = proportion_confint(count=x, nobs=n, alpha=0.05, method="wilson")
                     else:
@@ -384,17 +444,14 @@ with tab_props:
                     st.plotly_chart(fig, use_container_width=True)
 
                 with st.expander("ℹ️ Come leggere"):
-                    st.markdown("""
-                    - Verifica se la proporzione osservata **p̂** differisce da **p₀**.  
-                    - **p < 0.05** → evidenza di differenza; la **CI95%** di p̂ quantifica l’incertezza.  
-                    """)
+                    how_to_read("prop_one")
 
         # ── 2 proporzioni
         else:
             y = st.selectbox("Outcome (binario/categoriale)", options=cat_vars + num_vars, key=k("p2_y"))
             g = st.selectbox("Gruppo (categoriale)", options=cat_vars, key=k("p2_g"))
             s = df[y]
-            if not (pd.api.types.is_numeric_dtype(s) and set(pd.unique(s.dropna())) <= {0,1}):
+            if not (pd.api.types.is_numeric_dtype(s) and set(pd.unique(s.dropna())) <= {0, 1}):
                 succ_options = sorted(s.astype(str).dropna().unique().tolist())
                 success = st.selectbox("Categoria considerata 'successo'", options=succ_options, key=k("p2_succ"))
             else:
@@ -404,21 +461,23 @@ with tab_props:
             if len(use_lvls) != 2:
                 st.info("Selezioni esattamente due gruppi.")
             else:
-                df2 = df[df[g].astype(str).isin(use_lvls)]
-                x1, n1, lab = _counts_from_var(y, success_label=success)
-                # Calcola separatamente per gruppo
-                s1 = df2[df2[g].astype(str)==use_lvls[0]][y]
-                s2 = df2[df2[g].astype(str)==use_lvls[1]][y]
-                def _count(s):
-                    if pd.api.types.is_numeric_dtype(s) and set(pd.unique(s.dropna())) <= {0,1}:
-                        return int((s==1).sum()), int(s.notna().sum())
+                # Filtra ai due gruppi selezionati
+                dfg = df[df[g].astype(str).isin(use_lvls)].copy()
+                s1 = dfg[dfg[g].astype(str)==use_lvls[0]][y]
+                s2 = dfg[dfg[g].astype(str)==use_lvls[1]][y]
+
+                def _count(series: pd.Series, succ_label: str | None):
+                    if pd.api.types.is_numeric_dtype(series) and set(pd.unique(series.dropna())) <= {0, 1}:
+                        return int((series == 1).sum()), int(series.notna().sum())
                     else:
-                        return int((s.astype(str)==success).sum()), int(s.notna().sum())
-                x_a, n_a = _count(s1); x_b, n_b = _count(s2)
+                        return int((series.astype(str) == succ_label).sum()), int(series.notna().sum())
+
+                x_a, n_a = _count(s1, success)
+                x_b, n_b = _count(s2, success)
+
                 if proportions_ztest is not None:
                     stat, p = proportions_ztest(count=[x_a, x_b], nobs=[n_a, n_b], alternative="two-sided")
-                    p1, p2 = x_a/n_a, x_b/n_b
-                    # CI per ciascuna prop (Wilson)
+                    p1, p2 = (x_a/n_a if n_a else np.nan), (x_b/n_b if n_b else np.nan)
                     if proportion_confint is not None:
                         lo1, hi1 = proportion_confint(x_a, n_a, method="wilson")
                         lo2, hi2 = proportion_confint(x_b, n_b, method="wilson")
@@ -426,7 +485,6 @@ with tab_props:
                         se1 = math.sqrt(p1*(1-p1)/n_a); se2 = math.sqrt(p2*(1-p2)/n_b)
                         lo1, hi1 = p1-1.96*se1, p1+1.96*se1
                         lo2, hi2 = p2-1.96*se2, p2+1.96*se2
-                    # diff e CI (Wald)
                     diff = p1 - p2
                     se_diff = math.sqrt(p1*(1-p1)/n_a + p2*(1-p2)/n_b)
                     lo_d, hi_d = diff - 1.96*se_diff, diff + 1.96*se_diff
@@ -449,10 +507,7 @@ with tab_props:
                     st.plotly_chart(fig, use_container_width=True)
 
                 with st.expander("ℹ️ Come leggere"):
-                    st.markdown("""
-                    - Confronto tra due proporzioni. **p < 0.05** → differenza significativa.  
-                    - Le **CI95%** sulle proporzioni e sulla **differenza** aiutano a valutare l’ampiezza dell’effetto.  
-                    """)
+                    how_to_read("prop_two")
 
 # =============================================================================
 # 3) ASSOCIAZIONE TRA CATEGORIALI
@@ -475,21 +530,19 @@ with tab_cat:
             chi2, p, dof, expected = stats.chi2_contingency(ct)
             n = ct.to_numpy().sum()
             r, c = ct.shape
-            # Phi / Cramer's V
             if r == 2 and c == 2:
                 phi = math.sqrt(chi2 / n) if n>0 else np.nan
                 st.markdown(f"**χ² = {chi2:.3f}** (df={dof}), **p = {p:.4f}**, **φ = {phi:.3f}**")
-            else:
-                k = min(r-1, c-1)
-                cramer_v = math.sqrt(chi2 / (n * k)) if n>0 and k>0 else np.nan
-                st.markdown(f"**χ² = {chi2:.3f}** (df={dof}), **p = {p:.4f}**, **V di Cramér = {cramer_v:.3f}**")
-
-            if r == 2 and c == 2:
+                # Fisher exact per 2x2
                 try:
                     OR, p_f = stats.fisher_exact(ct.values)
                     st.markdown(f"**Fisher exact**: OR = {OR:.3f}, p = {p_f:.4f}")
                 except Exception:
                     pass
+            else:
+                k_min = min(r-1, c-1)  # ATTENZIONE: non sovrascrive la funzione k(...)
+                cramer_v = math.sqrt(chi2 / (n * k_min)) if n>0 and k_min>0 else np.nan
+                st.markdown(f"**χ² = {chi2:.3f}** (df={dof}), **p = {p:.4f}**, **V di Cramér = {cramer_v:.3f}**")
 
         if px is not None:
             heat = px.imshow(ct, text_auto=True, aspect="auto", color_continuous_scale="Blues",
@@ -497,11 +550,7 @@ with tab_cat:
             st.plotly_chart(heat, use_container_width=True)
 
         with st.expander("ℹ️ Come leggere"):
-            st.markdown("""
-            - **Chi-quadrato** verifica l’associazione tra le due variabili. **p < 0.05** → associazione presente.  
-            - **φ** (2×2) o **V di Cramér** (>2 categorie) quantificano l’intensità dell’associazione (0=nessuna, →1 forte).  
-            - In tabelle 2×2 con basse frequenze, usi **Fisher** (esatto).  
-            """)
+            how_to_read("chi_fisher")
 
 # =============================================================================
 # 4) CORRELAZIONI
@@ -527,11 +576,9 @@ with tab_corr:
             elif method == "Spearman":
                 r, p = stats.spearmanr(xs, ys)
                 st.markdown(f"**ρ = {r:.3f}**, **p = {p:.4f}**, **n = {n}**")
-                lo, hi = (np.nan, np.nan)
             else:
                 r, p = stats.kendalltau(xs, ys)
                 st.markdown(f"**τ = {r:.3f}**, **p = {p:.4f}**, **n = {n}**")
-                lo, hi = (np.nan, np.nan)
 
             if px is not None:
                 fig = px.scatter(df, x=x, y=y, trendline=("ols" if method=="Pearson" and sm is not None else None),
@@ -539,11 +586,7 @@ with tab_corr:
                 st.plotly_chart(fig, use_container_width=True)
 
             with st.expander("ℹ️ Come leggere"):
-                st.markdown("""
-                - **Pearson r**: relazione lineare (−1…+1). **Spearman ρ**: monotona; **Kendall τ**: concordanza.  
-                - **p < 0.05** → correlazione diversa da 0. **CI95%** (per Pearson) quantifica l’incertezza.  
-                - Ispezioni sempre lo **scatterplot** per outlier e non linearità.
-                """)
+                how_to_read("corr")
 
 # =============================================================================
 # 5) ANOVA / KRUSKAL
@@ -556,43 +599,30 @@ with tab_anova:
         y = st.selectbox("Variabile risposta (numerica)", options=num_vars, key=k("a_y"))
         g = st.selectbox("Fattore (gruppi)", options=cat_vars, key=k("a_g"))
         method = st.selectbox("Metodo", ["ANOVA (var. uguali)", "Welch ANOVA (var. diverse)", "Kruskal–Wallis"], key=k("a_method"))
-        # calcolo gruppi
-        groups = [ _safe_numeric(sub[y]) for _, sub in df.groupby(g) ]
-        labels = [ str(lv) for lv, _ in df.groupby(g) ]
+
+        # Gruppi (per eventuali statistiche non parametriche)
+        groups = [_safe_numeric(sub[y]) for _, sub in df.groupby(g)]
+        labels = [str(lv) for lv, _ in df.groupby(g)]
 
         if method == "Kruskal–Wallis":
-            if stats is None or any(len(gr)<2 for gr in groups):
+            if stats is None or any(len(gr) < 2 for gr in groups):
                 st.info("Dati insufficienti o SciPy non disponibile.")
             else:
                 H, p = stats.kruskal(*groups)
-                # Epsilon squared (non parametrico) approssimato
                 n_tot = sum(len(gr) for gr in groups)
                 eps2 = (H - len(groups) + 1) / (n_tot - len(groups)) if n_tot > len(groups) else np.nan
                 st.markdown(f"**H = {H:.3f}**, **p = {p:.4f}**, **ε² ≈ {eps2:.3f}**")
                 with st.expander("ℹ️ Come leggere"):
-                    st.markdown("""
-                    - **Kruskal–Wallis** confronta più gruppi senza assumere normalità.  
-                    - **p < 0.05** → differenza tra almeno due gruppi. **ε²** è l’analogo dell’eta-squared.
-                    """)
+                    how_to_read("anova")
         else:
-            # ANOVA classica / Welch ANOVA
             if smf is None:
                 st.info("`statsmodels` non disponibile: per ANOVA si consiglia StatsModels.")
             else:
-                # formula OLS: y ~ C(g)
                 formula = f"`{y}` ~ C(`{g}`)"
                 model = smf.ols(formula=formula, data=df).fit()
-                if method.startswith("Welch"):
-                    # Welch ANOVA (WRS) via statsmodels: use `sm.stats.anova_lm` with typ=2 and robust? -> non nativa.
-                    # Approccio pratico: Brown–Forsythe robust test ( Levene su residui ) + OLS? Qui mostriamo ANOVA standard e indichiamo var disuguali.
-                    anova = sm.stats.anova_lm(model, typ=2)
-                    note = "Welch non disponibile nativamente: riportata ANOVA (Type II). Verifichi omoscedasticità."
-                else:
-                    anova = sm.stats.anova_lm(model, typ=2)
-                    note = "ANOVA Type II."
-
+                # ANOVA Type II (come riferimento uniforme)
+                anova = sm.stats.anova_lm(model, typ=2)
                 st.dataframe(anova, use_container_width=True)
-                # Eta-squared / Omega-squared (1 via)
                 try:
                     ss_between = float(anova.loc[f"C(`{g}`)", "sum_sq"])
                     ss_resid  = float(anova.loc["Residual", "sum_sq"])
@@ -600,30 +630,27 @@ with tab_anova:
                     df_resid   = int(anova.loc["Residual", "df"])
                     sst = ss_between + ss_resid
                     eta2 = ss_between / sst if sst>0 else np.nan
-                    # omega^2 = (SSb - df_between*MSw) / (SSt + MSw)
                     msw = ss_resid/df_resid if df_resid>0 else np.nan
                     omega2 = ((ss_between - df_between*msw) / (sst + msw)) if (sst>0 and not np.isnan(msw)) else np.nan
-                    st.markdown(f"**η² = {eta2:.3f}**, **ω² = {omega2:.3f}**  \n_{note}_")
+                    st.markdown(f"**η² = {eta2:.3f}**, **ω² = {omega2:.3f}**  \n_ANOVA Type II mostrata come riferimento._")
                 except Exception:
                     pass
 
                 with st.expander("ℹ️ Come leggere"):
-                    st.markdown("""
-                    - **ANOVA** verifica differenze tra ≥3 medie. **p < 0.05** → almeno due gruppi differiscono.  
-                    - **η² / ω²**: quota di varianza spiegata (ω² è meno ottimista).  
-                    - Se varianze disuguali, preferire **Welch** (qui riportiamo ANOVA Type II come riferimento).
-                    """)
+                    how_to_read("anova")
 
         if px is not None:
             fig = px.box(df, x=g, y=y, points="outliers", template="simple_white", title=f"{y} per {g}")
             st.plotly_chart(fig, use_container_width=True)
 
-        # Post-hoc (Tukey) se disponibile
+        # Post-hoc (Tukey) se disponibile e pertinente (ANOVA classica)
         if pairwise_tukeyhsd is not None and method != "Kruskal–Wallis":
             st.markdown("**Confronti multipli (Tukey HSD)**")
             try:
                 res = pairwise_tukeyhsd(endog=df[y].astype(float), groups=df[g].astype(str), alpha=0.05)
                 st.text(res.summary().as_text())
+                with st.expander("ℹ️ Come leggere Tukey HSD"):
+                    how_to_read("tukey")
             except Exception as e:
                 st.caption(f"Tukey non disponibile: {e}")
         else:
@@ -639,5 +666,5 @@ with nav1:
         st.switch_page("pages/4_🔎_Assumption_Checks.py")
 with nav2:
     if st.button("➡️ Vai: Correlation Analysis", use_container_width=True, key=k("go_next")):
-        # Attenzione: nel suo progetto il file ha doppio underscore
+        # Adegui questo percorso al nome reale del file successivo nel suo progetto
         st.switch_page("pages/6__Correlation_Analysis.py")
