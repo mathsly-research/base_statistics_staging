@@ -2,424 +2,384 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import json, io, uuid, datetime as dt
+import uuid, datetime as dt, json
 
 from core.state import init_state
-
-# Plotly
 import plotly.graph_objects as go
 
-# Opzionali per export HTML/DOCX
+# Opzionale: markdown -> HTML
 try:
-    import markdown as mdconv  # pip install markdown
+    import markdown as mdconv
     _HAS_MD = True
 except Exception:
     _HAS_MD = False
 
-try:
-    from docx import Document  # pip install python-docx
-    _HAS_DOCX = True
-except Exception:
-    _HAS_DOCX = False
-
-
 # ===========================================================
-# Utilità
-# ===========================================================
-def _ensure_report_store():
-    if "report_items" not in st.session_state or not isinstance(st.session_state.report_items, list):
-        st.session_state.report_items = []
-    # backfill id/timestamp per elementi già presenti
-    changed = False
-    for it in st.session_state.report_items:
-        if "id" not in it:
-            it["id"] = str(uuid.uuid4())
-            changed = True
-        if "created_at" not in it:
-            it["created_at"] = dt.datetime.now().isoformat(timespec="seconds")
-            changed = True
-        if "title" not in it:
-            it["title"] = it.get("type","Item")
-            changed = True
-        if "content" not in it:
-            it["content"] = {}
-            changed = True
-    if changed:
-        st.session_state.report_items = list(st.session_state.report_items)
-
-def _to_table(obj, round_at=4):
-    """Converte dict/list in DataFrame leggibile (best-effort)."""
-    if obj is None:
-        return pd.DataFrame()
-    try:
-        if isinstance(obj, pd.DataFrame):
-            return obj
-        if isinstance(obj, list):
-            if len(obj)==0:
-                return pd.DataFrame()
-            if isinstance(obj[0], dict):
-                return pd.DataFrame(obj)
-            return pd.DataFrame({ "valori": obj })
-        if isinstance(obj, dict):
-            return pd.DataFrame(list(obj.items()), columns=["Chiave","Valore"])
-    except Exception:
-        pass
-    return pd.DataFrame({"Valore":[obj]})
-
-def _short_stats_for_card(item):
-    """Estratto breve per la card, dipendente dal tipo."""
-    t = item.get("type","").lower()
-    c = item.get("content",{})
-    out = []
-    try:
-        if t == "regression_ols":
-            out.append(f"R²={c.get('r2',np.nan):.3f} | AIC={c.get('aic',np.nan):.1f}")
-        elif t == "regression_logit":
-            pr2 = c.get("pseudo_r2_mcfadden", None)
-            if pr2 is not None:
-                out.append(f"Pseudo-R²={pr2:.3f}")
-            aic = c.get("aic", None)
-            if aic is not None and np.isfinite(aic):
-                out.append(f"AIC={aic:.1f}")
-        elif t == "regression_poisson":
-            out.append(f"AIC={c.get('aic',np.nan):.1f} | Dev={c.get('deviance',np.nan):.1f}")
-        elif t == "regression_logit_regularized":
-            out.append(f"Penalità={c.get('penalty','?')} | C={c.get('C','?')}")
-        elif t == "diagnostic_test":
-            cm = c.get("confusion_matrix",{})
-            prev = cm.get("Prevalence", None)
-            if prev is not None and np.isfinite(prev):
-                out.append(f"Prev={prev:.2%}")
-            try:
-                mets = pd.DataFrame(c.get("metrics",[]))
-                for m in ["Sensibilità","Specificità","PPV","NPV"]:
-                    val = float(mets.loc[mets["Metrica"]==m, "Valore"].values[0])
-                    out.append(f"{m[:3]}={val:.2f}")
-                    if len(out)>=3: break
-            except Exception:
-                pass
-        elif t == "agreement_continuous":
-            ba = pd.DataFrame(item["content"].get("bland_altman",[]))
-            if not ba.empty:
-                try:
-                    bias = float(ba.loc[ba["Parametro"]=="Bias","Valore"].values[0])
-                    loa_l = float(ba.loc[ba["Parametro"]=="LoA bassa","Valore"].values[0])
-                    loa_h = float(ba.loc[ba["Parametro"]=="LoA alta","Valore"].values[0])
-                    out.append(f"Bias={bias:.3g} | LoA=[{loa_l:.3g},{loa_h:.3g}]")
-                except Exception:
-                    pass
-            ccc = item["content"].get("ccc",{})
-            if "value" in ccc:
-                out.append(f"CCC={ccc['value']:.3f}")
-        elif t == "agreement_icc":
-            icc21 = item["content"].get("icc21",None)
-            icc2k = item["content"].get("icc2k",None)
-            out.append(f"ICC(2,1)={icc21:.3f} | ICC(2,k)={icc2k:.3f}")
-        elif t == "agreement_kappa":
-            out.append(f"Kappa={item['content'].get('kappa',np.nan):.3f}")
-        elif t == "survival_analysis":
-            N = item["content"].get("N",None); ev = item["content"].get("events",None)
-            if N is not None and ev is not None:
-                out.append(f"N={N}, Eventi={ev}")
-        elif t == "longitudinal_lmm":
-            r2m = item["content"].get("r2_marginal", None)
-            r2c = item["content"].get("r2_conditional", None)
-            out.append(f"R²m={r2m:.3f} | R²c={r2c:.3f}")
-        elif t == "longitudinal_gee":
-            out.append(f"Corr={item['content'].get('cov_struct','?')}")
-    except Exception:
-        pass
-    return " • ".join([s for s in out if s])
-
-def _render_small_bar_by_type(df_counts):
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=df_counts["type"], y=df_counts["n"]))
-    fig.update_layout(title="Elementi per tipologia", xaxis_title="", yaxis_title="Conteggio", height=300, margin=dict(t=40,b=20))
-    return fig
-
-def _compile_markdown(title, author, selected_items):
-    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-    md = [f"# {title}", "", f"*Generato: {now}*  ", ""]
-    if author:
-        md.insert(2, f"*Autore: {author}*  ")
-
-    # Sezione dataset (se presente)
-    if "df_original" in st.session_state and isinstance(st.session_state.df_original, pd.DataFrame):
-        df = st.session_state.df_original
-        md += [
-            "## Dataset",
-            f"- Osservazioni: **{df.shape[0]}**  ",
-            f"- Variabili: **{df.shape[1]}**  ",
-            ""
-        ]
-
-    for it in selected_items:
-        md += [f"## {it.get('title','Sezione')}", f"*Tipo:* `{it.get('type','-')}`  ", f"*Creato:* {it.get('created_at','-')}  ", ""]
-        c = it.get("content",{})
-        # prova formattazioni sintetiche per tipi noti
-        t = it.get("type","").lower()
-        try:
-            if t == "regression_ols":
-                md += ["**OLS**",
-                       f"- N: {c.get('nobs','')}",
-                       f"- R²: {c.get('r2',''):.3f} (adj {c.get('r2_adj',''):.3f})",
-                       f"- AIC: {c.get('aic',''):.2f} | BIC: {c.get('bic',''):.2f}", ""]
-                coefs = _to_table(c.get("coefficients",[])).round(4)
-                md += ["**Coefficienti**", coefs.to_markdown(index=False), ""]
-            elif t == "regression_logit":
-                md += ["**Logistica**",
-                       f"- N: {c.get('nobs','')}",
-                       f"- LogLik: {c.get('loglik','')} | Null: {c.get('loglik_null','')}",
-                       f"- Pseudo-R² (McFadden): {c.get('pseudo_r2_mcfadden',np.nan):.3f}",
-                       f"- AIC: {c.get('aic',''):.2f} | BIC: {c.get('bic',''):.2f}", ""]
-                ors = _to_table(c.get("odds_ratios",[])).round(4)
-                md += ["**Odds Ratio**", ors.to_markdown(index=False), ""]
-            elif t == "regression_logit_regularized":
-                md += [f"**Logistica regolarizzata** (penalty={c.get('penalty')}, C={c.get('C')})",""]
-                coef = _to_table(c.get("coefficients",[])).round(4)
-                md += ["**Coefficienti**", coef.to_markdown(index=False), ""]
-            elif t == "regression_poisson":
-                md += [f"**GLM Poisson** — N={c.get('nobs','')}  ",
-                       f"- Deviance: {c.get('deviance','')} | Pearson χ²: {c.get('pearson_chi2','')} | AIC: {c.get('aic','')}", ""]
-                irr = _to_table(c.get("irr",[])).round(4)
-                md += ["**IRR**", irr.to_markdown(index=False), ""]
-            elif t == "diagnostic_test":
-                cm = c.get("confusion_matrix",{})
-                md += [f"**Test diagnostico** — N={cm.get('Total','')}, Prevalenza={cm.get('Prevalence',np.nan):.3f}", ""]
-                mets = _to_table(c.get("metrics",[])).round(3)
-                md += ["**Metriche (IC95%)**", mets.to_markdown(index=False), ""]
-                if "calibration" in c:
-                    cal = c["calibration"]
-                    md += [f"**Calibrazione** — Brier={cal.get('brier',np.nan):.3f}, Intercetta={cal.get('intercept',np.nan):.3f}, Slope={cal.get('slope',np.nan):.3f}",
-                           ""]
-            elif t == "agreement_continuous":
-                ba = _to_table(c.get("bland_altman",[])).round(4)
-                md += ["**Bland–Altman**", ba.to_markdown(index=False), ""]
-                ccc = c.get("ccc",{})
-                if ccc:
-                    md += [f"**CCC (Lin)**: {ccc.get('value',np.nan):.3f}  (IC 95%: {ccc.get('ci',[np.nan,np.nan])[0]:.3f}–{ccc.get('ci',[np.nan,np.nan])[1]:.3f})", ""]
-            elif t == "agreement_icc":
-                md += [f"**ICC** — ICC(2,1)={c.get('icc21',np.nan):.3f}, ICC(2,k)={c.get('icc2k',np.nan):.3f}", ""]
-            elif t == "agreement_kappa":
-                md += [f"**Kappa** — {c.get('kappa',np.nan):.3f} (pesata: {c.get('weighted',False)})", ""]
-            elif t == "survival_analysis":
-                md += [f"**Sopravvivenza** — N={c.get('N','')}, Eventi={c.get('events','')}, Censure={c.get('censored','')}", ""]
-                if "cox_hr" in c:
-                    hr = _to_table(c.get("cox_hr",[])).round(4)
-                    md += ["**Cox — HR (IC95%)**", hr.to_markdown(index=False), ""]
-            elif t == "longitudinal_lmm":
-                md += [f"**LMM** — formula: `{c.get('formula','')}`; random: `{c.get('random','')}`",
-                       f"- R² marginale: {c.get('r2_marginal',np.nan):.3f} | R² condizionale: {c.get('r2_conditional',np.nan):.3f}", ""]
-                fe = _to_table(c.get("fixed_effects",[])).round(4)
-                md += ["**Effetti fissi**", fe.to_markdown(index=False), ""]
-            elif t == "longitudinal_gee":
-                md += [f"**GEE** — formula: `{c.get('formula','')}`; corr: `{c.get('cov_struct','')}`",""]
-                cf = _to_table(c.get("coefficients",[])).round(4)
-                md += ["**Coefficienti**", cf.to_markdown(index=False), ""]
-            else:
-                md += ["**Dettagli**", _to_table(c).to_markdown(index=False), ""]
-        except Exception:
-            md += ["**Dettagli (grezzi)**", "```json", json.dumps(c, indent=2, ensure_ascii=False), "```", ""]
-    return "\n".join(md)
-
-
-def _build_html_from_markdown(md_text:str) -> str:
-    if _HAS_MD:
-        body = mdconv.markdown(md_text, extensions=['tables', 'fenced_code'])
-    else:
-        # fallback minimale
-        body = "<pre style='white-space:pre-wrap'>" + md_text.replace("&","&amp;").replace("<","&lt;") + "</pre>"
-    html = f"""<!doctype html>
-<html><head>
-<meta charset="utf-8"/>
-<title>Report</title>
-<style>
-body{{font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 40px;}}
-table{{border-collapse: collapse;}}
-th,td{{border:1px solid #ccc; padding:6px 8px;}}
-h1,h2,h3{{margin-top:1.2em;}}
-code, pre{{background:#f7f7f7;}}
-</style>
-</head><body>{body}</body></html>"""
-    return html
-
-
-# ===========================================================
-# Pagina
+# Setup
 # ===========================================================
 init_state()
-st.title("📋 Results Summary — Dashboard")
+st.set_page_config(page_title="Results Summary", layout="wide")
+st.title("📋 Results Summary — Dashboard a card")
 
-_ensure_report_store()
+# Archivio risultati
+if "report_items" not in st.session_state or not isinstance(st.session_state.report_items, list):
+    st.session_state.report_items = []
+
+# Stato locale per note, selezione, pin e ordinamento
+st.session_state.setdefault("rs_notes", {})       # id -> testo nota
+st.session_state.setdefault("rs_selected", set()) # ids inclusi nel report
+st.session_state.setdefault("rs_pinned", set())   # ids evidenziati
+st.session_state.setdefault("rs_order", {})       # id -> int
+
+# Backfill campi minimi
+for it in st.session_state.report_items:
+    it.setdefault("id", str(uuid.uuid4()))
+    it.setdefault("created_at", dt.datetime.now().isoformat(timespec="seconds"))
+    it.setdefault("title", it.get("type","Item"))
+    it.setdefault("content", {})
+
 items = st.session_state.report_items
 
-# CSS per pulsanti più bassi
+# ===========================================================
+# Stile
+# ===========================================================
 st.markdown("""
 <style>
-.small-btn button[kind="primary"], .small-btn button[kind="secondary"] { padding: 0.2rem 0.6rem; line-height: 1.0; }
-.card { border-radius: 12px; padding: 12px; margin-bottom: 12px; box-shadow: 1px 1px 8px rgba(0,0,0,0.06); }
-.card h4 { margin: 0 0 6px 0; }
-.card .meta { color:#666; font-size:0.85em; margin-bottom:8px; }
+.card {border-radius:16px; padding:14px; margin-bottom:14px; box-shadow:0 2px 10px rgba(0,0,0,.06);}
+.card h4{margin:0 0 6px 0}
+.meta{color:#616161; font-size:.85em; margin-bottom:6px}
+.slim button[kind="primary"], .slim button[kind="secondary"]{padding:.2rem .6rem; line-height:1.0}
+.pill{display:inline-block; padding:3px 10px; border-radius:999px; background:#eef1f4; margin-right:6px; font-size:.8em}
+.badge{display:inline-block; padding:2px 8px; border-radius:6px; font-size:.75em; background:#fff; border:1px solid rgba(0,0,0,.06)}
+.kpi{font-weight:600}
+.grid{display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:12px;}
+@media (max-width: 1200px){ .grid{grid-template-columns:repeat(2, minmax(0,1fr));} }
+@media (max-width: 800px){ .grid{grid-template-columns:repeat(1, minmax(0,1fr));} }
 </style>
 """, unsafe_allow_html=True)
 
-# =========================
-# Panoramica
-# =========================
-st.subheader("Panoramica")
-if len(items) == 0:
-    st.info("Nessun elemento nel Results Summary. Aggiunga risultati dagli altri moduli.")
-else:
-    dfc = pd.DataFrame([{"type": it.get("type","?")} for it in items]).value_counts().reset_index()
-    if dfc.empty:
-        dfc = pd.DataFrame({"type":["?"],"n":[len(items)]})
+# ===========================================================
+# Mappatura stile per tipo
+# ===========================================================
+TYPE_STYLE = {
+    "regression_ols":               ("🧮", "#e8f5e9"),
+    "regression_logit":             ("🧮", "#e8f5e9"),
+    "regression_poisson":           ("🧮", "#e8f5e9"),
+    "regression_logit_regularized": ("🧮", "#e8f5e9"),
+    "diagnostic_test":              ("🔬", "#fff7e6"),
+    "agreement_continuous":         ("📏", "#e6f0ff"),
+    "agreement_icc":                ("📏", "#e6f0ff"),
+    "agreement_kappa":              ("📏", "#e6f0ff"),
+    "survival_analysis":            ("🧭", "#e6fff7"),
+    "longitudinal_lmm":             ("📉", "#f3e8ff"),
+    "longitudinal_gee":             ("📉", "#f3e8ff"),
+}
+
+SECTION_OF = {
+    "regression_ols": "Modelli di regressione",
+    "regression_logit": "Modelli di regressione",
+    "regression_poisson": "Modelli di regressione",
+    "regression_logit_regularized": "Modelli di regressione",
+    "diagnostic_test": "Test diagnostici",
+    "agreement_continuous": "Agreement",
+    "agreement_icc": "Agreement",
+    "agreement_kappa": "Agreement",
+    "survival_analysis": "Analisi di sopravvivenza",
+    "longitudinal_lmm": "Dati longitudinali",
+    "longitudinal_gee": "Dati longitudinali",
+}
+
+def _icon_bg(item_type: str):
+    return TYPE_STYLE.get(item_type, ("🗂️", "#f5f5f5"))
+
+# Breve riga per card
+def _short_line(item: dict) -> str:
+    t = (item.get("type") or "").lower(); c = item.get("content", {})
+    try:
+        if t == "regression_ols":
+            return f"R² {c.get('r2',np.nan):.3f} • AIC {c.get('aic',np.nan):.1f}"
+        if t == "regression_logit":
+            pr2 = c.get("pseudo_r2_mcfadden", np.nan)
+            return f"Pseudo-R² {pr2:.3f} • AIC {c.get('aic',np.nan):.1f}"
+        if t == "regression_poisson":
+            return f"Dev {c.get('deviance',np.nan):.1f} • AIC {c.get('aic',np.nan):.1f}"
+        if t == "regression_logit_regularized":
+            return f"{c.get('penalty','pen')}, C={c.get('C','?')}"
+        if t == "diagnostic_test":
+            mets = pd.DataFrame(c.get("metrics", []))
+            def pick(m):
+                try: return float(mets.loc[mets["Metrica"]==m,"Valore"].values[0])
+                except: return np.nan
+            return f"Sens {pick('Sensibilità'):.2f} • Spec {pick('Specificità'):.2f}"
+        if t == "agreement_continuous":
+            ba = pd.DataFrame(c.get("bland_altman", []))
+            if not ba.empty:
+                try:
+                    bias = float(ba.loc[ba["Parametro"]=="Bias","Valore"].values[0])
+                    return f"Bias {bias:.3g}"
+                except: pass
+            return "Bland–Altman"
+        if t == "agreement_icc":
+            return f"ICC(2,1) {item['content'].get('icc21',np.nan):.3f}"
+        if t == "agreement_kappa":
+            return f"Kappa {item['content'].get('kappa',np.nan):.3f}"
+        if t == "survival_analysis":
+            N = c.get("N"); ev = c.get("events")
+            return f"N {N} • Eventi {ev}"
+        if t == "longitudinal_lmm":
+            rm = c.get("r2_marginal", np.nan); rc = c.get("r2_conditional", np.nan)
+            return f"R²m {rm:.2f} • R²c {rc:.2f}"
+        if t == "longitudinal_gee":
+            return f"Corr {item['content'].get('cov_struct','—')}"
+    except Exception:
+        pass
+    return ""
+
+def _preview_table(item: dict) -> pd.DataFrame:
+    t = (item.get("type") or "").lower(); c = item.get("content", {})
+    try:
+        if t == "regression_ols":
+            return pd.DataFrame(c.get("coefficients", [])).head(8)
+        if t == "regression_logit":
+            return pd.DataFrame(c.get("odds_ratios", [])).head(8)
+        if t == "regression_poisson":
+            return pd.DataFrame(c.get("irr", [])).head(8)
+        if t == "diagnostic_test":
+            return pd.DataFrame(c.get("metrics", [])).head(8)
+        if t == "agreement_continuous":
+            return pd.DataFrame(c.get("bland_altman", [])).iloc[:8,:]
+        if t == "agreement_icc":
+            d = item["content"].copy()
+            return pd.DataFrame(list(d.items()), columns=["Parametro","Valore"])
+        if t == "agreement_kappa":
+            d = {"Kappa": c.get("kappa"), "Weighted": c.get("weighted")}
+            return pd.DataFrame(list(d.items()), columns=["Parametro","Valore"])
+        if t == "survival_analysis":
+            if "cox_hr" in c: return pd.DataFrame(c["cox_hr"]).head(8)
+            return pd.DataFrame(c.get("km_summary", []))
+        if t == "longitudinal_lmm":
+            return pd.DataFrame(c.get("fixed_effects", [])).head(8)
+        if t == "longitudinal_gee":
+            return pd.DataFrame(c.get("coefficients", [])).head(8)
+        return pd.DataFrame(list(c.items()), columns=["Chiave","Valore"])
+    except Exception:
+        return pd.DataFrame()
+
+# ===========================================================
+# Testata: dataset & conteggi
+# ===========================================================
+hdrL, hdrR = st.columns([3,2])
+with hdrL:
+    if "df_original" in st.session_state and isinstance(st.session_state.df_original, pd.DataFrame):
+        df0 = st.session_state.df_original
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Osservazioni", df0.shape[0])
+        c2.metric("Variabili", df0.shape[1])
+        c3.metric("Elementi salvati", len(items))
     else:
-        dfc.columns = ["type","n"]
-    left, right = st.columns(2)
-    with left:
-        with st.spinner("Genero il riepilogo per tipologia…"):
-            fig = _render_small_bar_by_type(dfc)
-            st.plotly_chart(fig, use_container_width=True)
-        st.caption("Conteggio degli elementi salvati per ciascuna tipologia.")
-    with right:
-        with st.spinner("Creo una tabella di sintesi…"):
-            resume = pd.DataFrame([{
-                "ID": it["id"][:8],
-                "Tipo": it.get("type",""),
-                "Titolo": it.get("title",""),
-                "Creato": it.get("created_at","")
-            } for it in items])
-            st.dataframe(resume, use_container_width=True, hide_index=True)
-        st.caption("Elenco compatto degli elementi presenti.")
+        st.info("Carichi un dataset nello Step 0 per mostrare i dettagli qui.")
 
-# =========================
-# Filtri e ricerca
-# =========================
-st.subheader("Filtri")
-types_avail = sorted({ it.get("type","") for it in items })
-colf1, colf2 = st.columns([2,3])
-with colf1:
-    sel_types = st.multiselect("Tipi inclusi", options=types_avail, default=types_avail)
-with colf2:
-    query = st.text_input("Ricerca nel titolo", value="")
-
-filtered = [it for it in items if it.get("type","") in sel_types and (query.lower() in it.get("title","").lower())]
-
-st.markdown(f"**Elementi filtrati**: {len(filtered)}")
-
-# =========================
-# Elenco dettagli (cards)
-# =========================
-for it in filtered:
-    with st.container():
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        c1, c2 = st.columns([3,2])
-        with c1:
-            st.markdown(f"### {it.get('title','(senza titolo)')}")
-            st.markdown(f"<div class='meta'>Tipo: <code>{it.get('type','')}</code> • Creato: {it.get('created_at','')}</div>", unsafe_allow_html=True)
-            st.write(_short_stats_for_card(it))
-        with c2:
-            # azioni
-            new_title = st.text_input("Rinomina", value=it.get("title",""), key=f"title_{it['id']}")
-            cols_btn = st.columns(3)
-            with cols_btn[0]:
-                if st.button("💾 Salva", key=f"save_{it['id']}", help="Aggiorna il titolo"):
-                    it["title"] = new_title
-                    st.success("Titolo aggiornato.")
-            with cols_btn[1]:
-                payload = json.dumps(it, ensure_ascii=False, indent=2)
-                st.download_button("⬇️ JSON", payload, file_name=f"{it['id']}_{it.get('type','item')}.json", mime="application/json", key=f"dl_{it['id']}")
-            with cols_btn[2]:
-                if st.button("🗑️ Elimina", key=f"del_{it['id']}"):
-                    st.session_state.report_items = [jj for jj in st.session_state.report_items if jj["id"] != it["id"]]
-                    st.warning("Elemento eliminato.")
-                    st.stop()
-        # anteprima dettagli
-        with st.expander("Anteprima dettagli (tabella)", expanded=False):
-            cont = it.get("content",{})
-            # prova a mostrare una tabella significativa
-            t = it.get("type","").lower()
-            df_show = pd.DataFrame()
-            if t in ("regression_ols","regression_poisson","regression_logit"):
-                df_show = _to_table(cont.get("coefficients") or cont.get("irr") or cont.get("odds_ratios"))
-            elif t == "diagnostic_test":
-                df_show = _to_table(cont.get("metrics"))
-            elif t == "agreement_continuous":
-                df_show = _to_table(cont.get("bland_altman"))
-            elif t == "survival_analysis":
-                df_show = _to_table(cont.get("cox_hr"))
-            elif t == "longitudinal_lmm":
-                df_show = _to_table(cont.get("fixed_effects"))
-            elif t == "longitudinal_gee":
-                df_show = _to_table(cont.get("coefficients"))
-            else:
-                df_show = _to_table(cont)
-            if not df_show.empty:
-                st.dataframe(df_show.round(4), use_container_width=True)
-            else:
-                st.info("Nessuna tabella sintetica disponibile per questo elemento.")
-        st.markdown('</div>', unsafe_allow_html=True)
+with hdrR:
+    if items:
+        counts = pd.Series([SECTION_OF.get(it.get("type",""), "Altri risultati") for it in items]).value_counts()
+        fig = go.Figure(data=[go.Pie(labels=counts.index.tolist(), values=counts.values.tolist(), hole=0.55)])
+        fig.update_layout(height=220, margin=dict(t=10,b=0,l=0,r=0), showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("Distribuzione per sezione")
 
 st.divider()
 
-# =========================
-# Export del Report
-# =========================
-st.subheader("Esporta report finale")
-colE1, colE2 = st.columns([3,2])
-with colE1:
-    report_title = st.text_input("Titolo report", value="Risultati dell’analisi")
-    author = st.text_input("Autore (opzionale)", value="")
-with colE2:
-    include_ids = st.multiselect("Seleziona elementi da includere", options=[f"{it['id'][:8]} — {it.get('title','')}" for it in filtered], default=[f"{it['id'][:8]} — {it.get('title','')}" for it in filtered])
-    chosen = []
-    chosen_ids = {x.split(" — ")[0] for x in include_ids}
-    for it in filtered:
-        if it["id"][:8] in chosen_ids:
-            chosen.append(it)
+# ===========================================================
+# Filtri essenziali
+# ===========================================================
+sec_options = sorted({SECTION_OF.get(it.get("type",""), "Altri risultati") for it in items})
+colF1, colF2 = st.columns([3,2])
+with colF1:
+    sec_sel = st.multiselect("Sezioni da mostrare", options=sec_options, default=sec_options)
+with colF2:
+    query = st.text_input("Cerca nel titolo", "")
 
-with st.spinner("Compilo il report (Markdown)…"):
-    md_text = _compile_markdown(report_title, author, chosen)
+# Ordine globale di default (per il report)
+DEFAULT_ORDER = {
+    "Test diagnostici": 1,
+    "Modelli di regressione": 2,
+    "Agreement": 3,
+    "Analisi di sopravvivenza": 4,
+    "Dati longitudinali": 5,
+    "Altri risultati": 6,
+}
 
-# download: Markdown
-st.download_button("⬇️ Scarica Markdown", md_text, file_name="report.md", mime="text/markdown")
+# Lista filtrata
+filtered = [it for it in items
+            if SECTION_OF.get(it.get("type",""), "Altri risultati") in sec_sel
+            and (query.lower() in it.get("title","").lower())]
 
-# download: HTML
-html_text = _build_html_from_markdown(md_text)
-st.download_button("⬇️ Scarica HTML", html_text, file_name="report.html", mime="text/html")
-
-# download: DOCX (se disponibile)
-if _HAS_DOCX:
-    with st.spinner("Genero DOCX…"):
-        try:
-            doc = Document()
-            for line in md_text.split("\n"):
-                if line.startswith("# "):
-                    doc.add_heading(line[2:], level=1)
-                elif line.startswith("## "):
-                    doc.add_heading(line[3:], level=2)
-                elif line.startswith("**") and line.endswith("**") and len(line) < 100:
-                    p = doc.add_paragraph()
-                    run = p.add_run(line.strip("*"))
-                    run.bold = True
-                elif line.strip().startswith("|") and line.strip().endswith("|"):
-                    # tabella markdown semplice
-                    rows = [r.strip() for r in line.strip().split("\n") if r.strip()]
-                    # qui semplifichiamo: rimandiamo la tabella, poiché la conversione completa è onerosa
-                    doc.add_paragraph(line)
-                else:
-                    doc.add_paragraph(line)
-            bio = io.BytesIO()
-            doc.save(bio)
-            st.download_button("⬇️ Scarica DOCX", data=bio.getvalue(), file_name="report.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-        except Exception as e:
-            st.warning(f"DOCX non generato: {e}")
+# ===========================================================
+# Card grid
+# ===========================================================
+st.subheader("Risultati")
+if not filtered:
+    st.info("Nessun elemento corrisponde ai filtri.")
 else:
-    st.caption("Per l’esportazione DOCX installare **python-docx** (`pip install python-docx`).")
+    st.markdown('<div class="grid">', unsafe_allow_html=True)
+    for it in filtered:
+        icon, bg = _icon_bg(it.get("type",""))
+        sec = SECTION_OF.get(it.get("type",""), "Altri risultati")
+        _id = it["id"]
 
-# =========================
-# Pulisci tutto
-# =========================
+        # Stato locale
+        note = st.session_state["rs_notes"].get(_id, "")
+        selected = _id in st.session_state["rs_selected"]
+        pinned = _id in st.session_state["rs_pinned"]
+        order_val = st.session_state["rs_order"].get(_id, DEFAULT_ORDER.get(sec, 99))
+
+        st.markdown(f"<div class='card' style='background:{bg}'>", unsafe_allow_html=True)
+        cTop, cBtn = st.columns([4,2])
+        with cTop:
+            st.markdown(f"### {icon} {it.get('title','(senza titolo)')}")
+            st.markdown(f"<div class='meta'>{sec} • {it.get('created_at','')}</div>", unsafe_allow_html=True)
+            line = _short_line(it)
+            if line:
+                st.markdown(f"<span class='pill kpi'>{line}</span>", unsafe_allow_html=True)
+
+        with cBtn:
+            st.checkbox("Includi nel report", key=f"sel_{_id}", value=selected)
+            st.toggle("Pin (highlight)", key=f"pin_{_id}", value=pinned)
+            st.number_input("Ordine", key=f"ord_{_id}", min_value=1, max_value=99, value=order_val, step=1)
+
+        # Anteprima compatta
+        with st.expander("Anteprima tabellare", expanded=False):
+            tab = _preview_table(it)
+            if not tab.empty:
+                st.dataframe(tab.round(4), use_container_width=True, hide_index=False)
+            else:
+                st.info("Anteprima non disponibile per questo elemento.")
+
+        # Note interpretative (entrano nel report)
+        st.text_area("Nota/interpretazione (includi nel report)", value=note, key=f"note_{_id"], height=80)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # Sync stato in session
+        st.session_state["rs_notes"][_id] = st.session_state[f"note_{_id}"]
+        if st.session_state[f"sel_{_id}"]:
+            st.session_state["rs_selected"].add(_id)
+        else:
+            st.session_state["rs_selected"].discard(_id)
+        if st.session_state[f"pin_{_id}"]:
+            st.session_state["rs_pinned"].add(_id)
+        else:
+            st.session_state["rs_pinned"].discard(_id)
+        st.session_state["rs_order"][_id] = st.session_state[f"ord_{_id}"]
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+st.divider()
+
+# ===========================================================
+# Composer del report
+# ===========================================================
+st.subheader("Composer del report")
+colC1, colC2 = st.columns([3,2])
+with colC1:
+    rpt_title = st.text_input("Titolo relazione", "Relazione statistica")
+    rpt_author = st.text_input("Autore/i", "")
+    rpt_affil = st.text_input("Affiliazione (opzionale)", "")
+with colC2:
+    rpt_summary = st.text_area("Abstract / Sintesi iniziale (opzionale)", height=120)
+
+# Raccoglie elementi selezionati
+sel_ids = list(st.session_state["rs_selected"])
+chosen = [it for it in items if it["id"] in sel_ids]
+
+# Ordina: per pin, per sezione, per ordine numerico
+def _sort_key(it):
+    sec = SECTION_OF.get(it.get("type",""), "Altri risultati")
+    base = DEFAULT_ORDER.get(sec, 99)
+    pin_bonus = 0 if it["id"] in st.session_state["rs_pinned"] else 1
+    manual = st.session_state["rs_order"].get(it["id"], base)
+    return (pin_bonus, base, manual, it.get("title",""))
+
+chosen = sorted(chosen, key=_sort_key)
+
+# Composizione markdown
+def _md_table(df: pd.DataFrame) -> str:
+    try: return df.to_markdown(index=False)
+    except Exception: return "*(tabella non disponibile)*"
+
+def _build_markdown(title, author, affil, abstract, items_sel):
+    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    md = [f"# {title}", f"*Data:* {now}  "]
+    if author: md.append(f"*Autore/i:* {author}  ")
+    if affil: md.append(f"*Affiliazione:* {affil}  ")
+    md.append("")
+    if abstract:
+        md += ["## Sintesi", abstract, ""]
+
+    # Sezione dataset (se disponibile)
+    if "df_original" in st.session_state and isinstance(st.session_state.df_original, pd.DataFrame):
+        df = st.session_state.df_original
+        md += ["## Dataset",
+               f"- Osservazioni: **{df.shape[0]}**",
+               f"- Variabili: **{df.shape[1]}**", ""]
+
+    # Raggruppa per sezione
+    groups = {}
+    for it in items_sel:
+        sec = SECTION_OF.get(it.get("type",""), "Altri risultati")
+        groups.setdefault(sec, []).append(it)
+
+    # Ordine sezioni
+    ordered_secs = sorted(groups.keys(), key=lambda s: DEFAULT_ORDER.get(s, 99))
+
+    for sec in ordered_secs:
+        md += [f"## {sec}", ""]
+        for it in groups[sec]:
+            md += [f"### {it.get('title','Sezione')}",
+                   f"*Tipo:* `{it.get('type','')}`  "]
+            line = _short_line(it)
+            if line: md.append(line)
+            # Tabella chiave
+            tab = _preview_table(it)
+            if not tab.empty:
+                md += ["", _md_table(tab.round(4))]
+            # Nota interpretativa
+            note = st.session_state["rs_notes"].get(it["id"], "").strip()
+            if note:
+                md += ["", "**Nota/interpretazione**", note]
+            md.append("")
+
+    # Chiusura standard
+    md += ["## Limitazioni (bozza)",
+           "- Disegno dello studio, eventuali assunzioni (normalità, PH, indipendenza) e loro verifica.",
+           "- Possibili bias di selezione/informazione, dati mancanti (MAR/MNAR).",
+           ""]
+    md += ["## Conclusioni (bozza)",
+           "Riepilogo dei risultati principali, implicazioni e raccomandazioni operative.",
+           ""]
+    return "\n".join(md)
+
+md_text = _build_markdown(rpt_title, rpt_author, rpt_affil, rpt_summary, chosen)
+
+# Export
+colD1, colD2, colD3 = st.columns(3)
+with colD1:
+    st.download_button("⬇️ Scarica Markdown", data=md_text, file_name="relazione_statistica.md", mime="text/markdown")
+with colD2:
+    if _HAS_MD:
+        html_body = mdconv.markdown(md_text, extensions=['tables','fenced_code'])
+        html_full = f"""<!doctype html><html><head><meta charset="utf-8">
+        <style>
+        body{{font-family:-apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin:40px}}
+        table{{border-collapse:collapse}} th,td{{border:1px solid #ccc; padding:6px 8px}}
+        </style></head><body>{html_body}</body></html>"""
+    else:
+        html_full = "<pre style='white-space:pre-wrap'>" + md_text + "</pre>"
+    st.download_button("⬇️ Scarica HTML", data=html_full, file_name="relazione_statistica.html", mime="text/html")
+with colD3:
+    payload = json.dumps(items, ensure_ascii=False, indent=2)
+    st.download_button("⬇️ Esporta archivio JSON", data=payload, file_name="results_summary_archive.json", mime="application/json")
+
+# Manutenzione
 with st.expander("Operazioni di manutenzione", expanded=False):
     c1, c2 = st.columns(2)
     with c1:
@@ -428,26 +388,9 @@ with st.expander("Operazioni di manutenzione", expanded=False):
             st.success("Archivio svuotato.")
             st.stop()
     with c2:
-        if st.button("💾 Esporta archivio (.json)"):
-            payload = json.dumps(st.session_state.report_items, ensure_ascii=False, indent=2)
-            st.download_button("⬇️ Scarica archivio", data=payload, file_name="results_summary_archive.json", mime="application/json", key="dl_archive")
-
-# =========================
-# Spiegazione
-# =========================
-with st.expander("ℹ️ Come leggere e usare la dashboard", expanded=False):
-    st.markdown("""
-**Cosa vede**  
-- **Panoramica**: conteggio per tipologia.  
-- **Filtri**: chiuda/mostri elementi per **tipo** e per testo nel **titolo**.  
-- **Cards**: per ciascun elemento, un **riassunto** (es. R², AIC, HR, LR, ICC…) e un’**anteprima** tabellare.  
-- **Azioni**: *Rinomina*, *Elimina*, *Scarica JSON* dell’elemento.  
-
-**Export del report**  
-- Scelga **Titolo**/**Autore**, selezioni gli elementi da includere, quindi scarichi il **Markdown** o l’**HTML** (DOCX se disponibile).  
-- Il report è **autocontenuto** e include tabelle chiave (coefficienti, HR, metriche diagnostiche, Bland–Altman, ecc.).  
-
-**Suggerimenti**  
-- Mantenga i titoli brevi ma informativi (es. “Logit — outcome Y (positiva=1)”).  
-- Se necessario, esporti l’**archivio JSON** per un backup; può ricaricarlo in futuro (basta leggere il file e reinserire in `st.session_state.report_items`).  
-""")
+        if st.button("🔄 Cancella selezioni/ordini locali"):
+            st.session_state["rs_notes"] = {}
+            st.session_state["rs_selected"] = set()
+            st.session_state["rs_pinned"] = set()
+            st.session_state["rs_order"] = {}
+            st.success("Impostazioni locali azzerate.")
