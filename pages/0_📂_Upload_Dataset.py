@@ -92,8 +92,7 @@ PAGES = [
     ("pages/10_📏_Agreement.py",                     "📏", "Agreement",         "Bland–Altman, CCC, Deming, ICC, Kappa", "#e6f0ff"),
     ("pages/11_📈_Analisi_di_Sopravvivenza.py",      "🧭", "Sopravvivenza",     "KM, Nelson–Aalen, Cox PH, AFT", "#f0fff0"),
     ("pages/12_📈_Longitudinale_Misure_Ripetute.py", "📉", "Longitudinale",     "LMM (RI/RS) e GEE, diagnostica", "#f0f8ff"),
-    ("pages/13_📋_Results_Summary.py",               "🧾", "Report finale",     "Sintesi dei risultati ed esportazione", "#f5f5f5"),
-    ("pages/14_📘_Glossary.py",                      "📘", "Glossario",         "Termini usati nell’app e definizioni", "#eef5ff"),
+    ("pages/13_📘_Glossary.py",                      "📘", "Glossario",         "Termini usati nell’app e definizioni", "#eef5ff"),
 ]
 
 st.divider()
