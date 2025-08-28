@@ -6,7 +6,6 @@ import numpy as np
 
 try:
     import plotly.express as px
-    import plotly.graph_objects as go
 except Exception:
     px = None
 
@@ -35,7 +34,7 @@ except Exception:
         with c3: st.metric("Ultimo aggiornamento", when)
 
 # ──────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Statistiche descrittive", layout="wide")
+st.set_page_config(page_title="📈 Statistiche descrittive", layout="wide")
 try:
     from nav import sidebar; sidebar()
 except Exception:
@@ -71,7 +70,7 @@ if not sel_num and not sel_cat:
     st.stop()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Passo 2 · Tabelle descrittive (sintesi)
+# Passo 2 · Tabelle descrittive
 # ──────────────────────────────────────────────────────────────────────────────
 st.subheader("Passo 2 · Tabelle descrittive")
 
@@ -83,7 +82,7 @@ if sel_num:
     st.dataframe(desc_num, use_container_width=True)
 
 if sel_cat:
-    st.markdown("**Distribuzione variabili categoriali (tabella)**")
+    st.markdown("**Distribuzione variabili categoriali**")
     for c in sel_cat:
         vc = df[c].value_counts(dropna=False)
         tab = vc.reset_index(name="count").rename(columns={"index": c})
@@ -93,7 +92,7 @@ if sel_cat:
         st.dataframe(tab, use_container_width=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Passo 3 · Visualizzazioni migliorate
+# Passo 3 · Visualizzazioni
 # ──────────────────────────────────────────────────────────────────────────────
 st.subheader("Passo 3 · Visualizzazioni")
 
@@ -107,68 +106,65 @@ else:
     # ==============================
     with tabs[0]:
         if sel_num:
-            left, right = st.columns([2, 1], vertical_alignment="top")
-            with left:
-                var_num = st.selectbox("Variabile numerica", options=sel_num, key=k("plot_num"))
-            with right:
-                hue = st.selectbox("Colore per sottogruppo (opz.)", options=["(nessuno)"] + cat_vars, key=k("hue"))
-                hue = None if hue == "(nessuno)" else hue
+            for var_num in sel_num:
+                st.markdown(f"### 🔢 {var_num}")
 
-            with st.expander("Opzioni grafico", expanded=True):
-                r1c1, r1c2, r1c3 = st.columns(3)
-                with r1c1:
-                    nbins = st.slider("Numero di bin", 10, 100, 30, 5, key=k("nbins"))
-                with r1c2:
-                    marginal = st.selectbox("Margine", ["box", "violin", "rug", "(nessuno)"], index=0, key=k("marg"))
-                with r1c3:
-                    show_ecdf = st.checkbox("Mostra ECDF (curva cumulata)", value=False, key=k("ecdf"))
+                left, right = st.columns(2, vertical_alignment="top")
 
-                r2c1, r2c2, r2c3 = st.columns(3)
-                with r2c1:
-                    log_x = st.checkbox("Scala logaritmica X", value=False, key=k("logx"))
-                with r2c2:
-                    facet_col = st.selectbox("Facet per colonna (opz.)", ["(nessuno)"] + cat_vars, key=k("facet"))
-                    facet_col = None if facet_col == "(nessuno)" else facet_col
-                with r2c3:
-                    barmode = st.selectbox("Sovrapposizione colori", ["overlay", "stack"], key=k("bmode"))
+                with left:
+                    nbins = st.slider(
+                        f"Numero bin per {var_num}", 10, 100, 30, 5, key=k(f"bins_{var_num}")
+                    )
+                    hue = st.selectbox(
+                        f"Colore per sottogruppo ({var_num})",
+                        options=["(nessuno)"] + cat_vars,
+                        key=k(f"hue_{var_num}")
+                    )
+                    hue = None if hue == "(nessuno)" else hue
 
-            # Istogramma migliorato
-            fig = px.histogram(
-                df,
-                x=var_num,
-                color=hue,
-                nbins=nbins,
-                barmode=barmode,
-                facet_col=facet_col,
-                marginal=None if marginal == "(nessuno)" else marginal,
-                template="simple_white",
-            )
-            fig.update_layout(
-                title=f"Distribuzione di {var_num}",
-                height=480,
-                margin=dict(l=10, r=10, t=60, b=10),
-                font=dict(size=16),
-            )
-            if log_x:
-                fig.update_xaxes(type="log")
+                    fig_hist = px.histogram(
+                        df,
+                        x=var_num,
+                        color=hue,
+                        nbins=nbins,
+                        template="simple_white",
+                    )
+                    fig_hist.update_layout(
+                        title=f"Istogramma di {var_num}",
+                        height=400,
+                        margin=dict(l=10, r=10, t=50, b=10),
+                        font=dict(size=14)
+                    )
+                    st.plotly_chart(fig_hist, use_container_width=True)
 
-            # Hover/etichette leggibili
-            fig.update_traces(hovertemplate="%{x}<br>count=%{y}")
-
-            st.plotly_chart(fig, use_container_width=True)
-
-            # ECDF (opzionale) — grafico cumulativo
-            if show_ecdf:
-                ecdf_fig = px.ecdf(
-                    df, x=var_num, color=hue, facet_col=facet_col, template="simple_white"
-                )
-                ecdf_fig.update_layout(
-                    title=f"ECDF di {var_num}",
-                    height=420,
-                    margin=dict(l=10, r=10, t=50, b=10),
-                    font=dict(size=16),
-                )
-                st.plotly_chart(ecdf_fig, use_container_width=True)
+                with right:
+                    style = st.selectbox(
+                        f"Tipo grafico ({var_num})",
+                        ["Boxplot", "Violin"],
+                        key=k(f"style_{var_num}")
+                    )
+                    if style == "Boxplot":
+                        fig_box = px.box(
+                            df, y=var_num, color=hue, points="all", template="simple_white"
+                        )
+                        fig_box.update_layout(
+                            title=f"Boxplot di {var_num}",
+                            height=400,
+                            margin=dict(l=10, r=10, t=50, b=10),
+                            font=dict(size=14)
+                        )
+                        st.plotly_chart(fig_box, use_container_width=True)
+                    else:
+                        fig_violin = px.violin(
+                            df, y=var_num, color=hue, box=True, points="all", template="simple_white"
+                        )
+                        fig_violin.update_layout(
+                            title=f"Violin plot di {var_num}",
+                            height=400,
+                            margin=dict(l=10, r=10, t=50, b=10),
+                            font=dict(size=14)
+                        )
+                        st.plotly_chart(fig_violin, use_container_width=True)
         else:
             st.info("Nessuna variabile numerica selezionata.")
 
@@ -187,30 +183,13 @@ else:
             with top_row[3]:
                 orient = st.selectbox("Orientamento", ["Verticale", "Orizzontale"], key=k("orient"))
 
-            opt_row = st.columns([1, 1, 1])
-            with opt_row[0]:
-                order_mode = st.selectbox("Ordina per", ["Frequenza ↓", "Etichetta A→Z"], key=k("ord"))
-            with opt_row[1]:
-                other_thr = st.slider("Soglia 'Altro' (%)", 0, 20, 0, 1, key=k("other_thr"))
-            with opt_row[2]:
-                color_by = st.selectbox("Colore per sottogruppo (opz.)", ["(nessuno)"] + cat_vars, key=k("cat_hue"))
-                color_by = None if color_by == "(nessuno)" else color_by
+            order_mode = st.selectbox("Ordina per", ["Frequenza ↓", "Etichetta A→Z"], key=k("ord"))
 
-            # Frequenze robuste
+            # Frequenze
             ser = df[var_cat]
             freq = ser.value_counts(dropna=False).reset_index(name="count").rename(columns={"index": var_cat})
             freq[var_cat] = freq[var_cat].astype(str)
             freq["percent"] = freq["count"] / len(df) * 100
-
-            # Raggruppa in "Altro" sotto una soglia %
-            if other_thr and other_thr > 0:
-                major = freq[freq["percent"] >= other_thr]
-                minor = freq[freq["percent"] < other_thr]
-                if not minor.empty:
-                    other_row = pd.DataFrame({var_cat: ["Altro"], 
-                                              "count": [int(minor["count"].sum())],
-                                              "percent": [minor["percent"].sum()]})
-                    freq = pd.concat([major, other_row], ignore_index=True)
 
             # Ordine
             if order_mode == "Frequenza ↓":
@@ -222,49 +201,18 @@ else:
             if top_n and top_n > 0:
                 freq = freq.head(top_n)
 
-            # Preparazione figure
             if show_mode == "Percentuali":
-                y_col = "percent"
-                y_title = "Percentuale"
-                textfmt = "%{text:.1f}%"
+                y_col = "percent"; y_title = "Percentuale"; textfmt = "%{text:.1f}%"
             else:
-                y_col = "count"
-                y_title = "Frequenza"
-                textfmt = "%{text}"
+                y_col = "count"; y_title = "Frequenza"; textfmt = "%{text}"
 
-            if color_by is None:
-                # Bar semplice
-                if orient == "Verticale":
-                    fig_cat = px.bar(freq, x=var_cat, y=y_col, text=y_col, template="simple_white")
-                    fig_cat.update_traces(texttemplate=textfmt, textposition="outside", cliponaxis=False)
-                else:
-                    fig_cat = px.bar(freq, x=y_col, y=var_cat, text=y_col, orientation="h", template="simple_white")
-                    fig_cat.update_traces(texttemplate=textfmt, textposition="outside", cliponaxis=False)
+            if orient == "Verticale":
+                fig_cat = px.bar(freq, x=var_cat, y=y_col, text=y_col, template="simple_white")
+                fig_cat.update_traces(texttemplate=textfmt, textposition="outside", cliponaxis=False)
             else:
-                # Bar per sottogruppo: si ricostruisce una tabella long (categoria × colore)
-                # Calcolo tabella pivot counts
-                crosstab = (
-                    df.assign(__cat__=df[var_cat].astype(str))
-                      .pivot_table(index="__cat__", columns=color_by, values=color_by, aggfunc="count", fill_value=0)
-                      .reset_index().rename(columns={"__cat__": var_cat})
-                )
-                # Eventuale 'Altro' non è ricalcolato per sottogruppo per semplicità
-                melt = crosstab.melt(id_vars=[var_cat], var_name=color_by, value_name="count")
-                if show_mode == "Percentuali":
-                    # Percentuale sul totale di ciascuna categoria
-                    tot = melt.groupby(var_cat)["count"].transform("sum")
-                    melt["percent"] = melt["count"] / tot * 100
-                    y_col = "percent"; y_title = "Percentuale"
-                # Ordinamento coerente con ordine delle categorie principali
-                cat_order = freq[var_cat].tolist()
-                melt[var_cat] = pd.Categorical(melt[var_cat], categories=cat_order, ordered=True)
-                if orient == "Verticale":
-                    fig_cat = px.bar(melt, x=var_cat, y=y_col, color=color_by, barmode="group", template="simple_white")
-                else:
-                    fig_cat = px.bar(melt, x=y_col, y=var_cat, color=color_by, barmode="group",
-                                     orientation="h", template="simple_white")
-                fig_cat.update_traces(hovertemplate=f"%{{x}}<br>%{{y}}")
-            
+                fig_cat = px.bar(freq, x=y_col, y=var_cat, text=y_col, orientation="h", template="simple_white")
+                fig_cat.update_traces(texttemplate=textfmt, textposition="outside", cliponaxis=False)
+
             fig_cat.update_layout(
                 title=f"Distribuzione di {var_cat}",
                 yaxis_title=y_title if orient == "Verticale" else None,
