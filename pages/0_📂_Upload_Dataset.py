@@ -80,18 +80,18 @@ def _exists(rel_path: str) -> str | None:
 
 # Card: (path, icon, title, desc, bgcolor)
 PAGES = [
-    ("pages/1_🧹_Data_Cleaning.py",                  "🧹", "Cleaning",          "Gestione missing values e filtri", "#e6f7ff"),
-    ("pages/2_📈_Descriptive_Statistics.py",         "📈", "Descrittive",       "Statistiche di base e riepilogo variabili", "#fff5e6"),
-    ("pages/3_📊_Explore_Distributions.py",          "📊", "Distribuzioni",     "Istogrammi, boxplot e violino", "#f9e6ff"),
-    ("pages/4_🔍_Assumption_Checks.py",              "🔍", "Assunzioni",        "Verifica normalità e omoscedasticità", "#e6ffe6"),
+    ("pages/1_🧹_Data_Cleaning.py",                  "🧹", "Data Cleaning",          "Gestione missing values e filtri", "#e6f7ff"),
+    ("pages/2_📈_Descriptive_Statistics.py",         "📈", "Statistiche Descrittive",       "Statistiche di base e riepilogo variabili", "#fff5e6"),
+    ("pages/3_📊_Explore_Distributions.py",          "📊", "Analisi Distribuzioni",     "Istogrammi, boxplot e violino", "#f9e6ff"),
+    ("pages/4_🔍_Assumption_Checks.py",              "🔍", "Verifica Assunzioni",        "Verifica normalità e omoscedasticità", "#e6ffe6"),
     ("pages/5_🧪_Statistical_Tests.py",              "🧪", "Test statistici",   "Confronti parametrici e non parametrici", "#fff0f0"),
-    ("pages/6_🔗_Correlation_Analysis.py",           "🔗", "Correlazioni",      "Relazioni tra variabili e heatmap", "#f0f5ff"),
-    ("pages/7_📂_Subgroup_Analysis.py",              "📂", "Sottogruppi",       "Confronti e descrittive per sottogruppi", "#eef7ff"),
-    ("pages/8_🧱_Regression.py",                     "🧱", "Regressione",       "Lineare, Logistica, Poisson", "#e8f5e9"),
+    ("pages/6_🔗_Correlation_Analysis.py",           "🔗", "Analisi Correlazioni",      "Relazioni tra variabili e heatmap", "#f0f5ff"),
+    ("pages/7_📂_Subgroup_Analysis.py",              "📂", "Analisi Sottogruppi",       "Confronti e descrittive per sottogruppi", "#eef7ff"),
+    ("pages/8_🧱_Regression.py",                     "🧱", "Analisi Regressione",       "Lineare, Logistica, Poisson", "#e8f5e9"),
     ("pages/9_🧪_Analisi_Test_Diagnostici.py",       "🔬", "Test diagnostici",  "Sens., Spec., LR, ROC/PR, DCA, Calibrazione", "#fff7e6"),
-    ("pages/10_📏_Agreement.py",                     "📏", "Agreement",         "Bland–Altman, CCC, Deming, ICC, Kappa", "#e6f0ff"),
-    ("pages/11_📈_Analisi_di_Sopravvivenza.py",      "🧭", "Sopravvivenza",     "KM, Nelson–Aalen, Cox PH, AFT", "#f0fff0"),
-    ("pages/12_📈_Longitudinale_Misure_Ripetute.py", "📉", "Longitudinale",     "LMM (RI/RS) e GEE, diagnostica", "#f0f8ff"),
+    ("pages/10_📏_Agreement.py",                     "📏", "Valutazione Agreement",         "Bland–Altman, CCC, Deming, ICC, Kappa", "#e6f0ff"),
+    ("pages/11_📈_Analisi_di_Sopravvivenza.py",      "🧭", "Analisi di Sopravvivenza",     "KM, Nelson–Aalen, Cox PH, AFT", "#f0fff0"),
+    ("pages/12_📈_Longitudinale_Misure_Ripetute.py", "📉", "Dati Longitudinali",     "LMM (RI/RS) e GEE, diagnostica", "#f0f8ff"),
     ("pages/13_📘_Glossary.py",                      "📘", "Glossario",         "Termini usati nell’app e definizioni", "#eef5ff"),
 ]
 
