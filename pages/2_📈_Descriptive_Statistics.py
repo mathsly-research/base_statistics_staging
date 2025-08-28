@@ -34,7 +34,7 @@ except Exception:
         with c3: st.metric("Ultimo aggiornamento", when)
 
 # ──────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="📈 Statistiche descrittive", layout="wide")
+st.set_page_config(page_title="Statistiche descrittive", layout="wide")
 try:
     from nav import sidebar; sidebar()
 except Exception:
@@ -61,7 +61,7 @@ cat_vars = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])]
 
 c1, c2 = st.columns(2)
 with c1:
-    sel_num = st.multiselect("Variabili numeriche", options=num_vars, default=num_vars[:3], key=k("sel_num"))
+    sel_num = st.multiselect("Variabili numeriche (per tabelle e grafici)", options=num_vars, default=num_vars[:3], key=k("sel_num"))
 with c2:
     sel_cat = st.multiselect("Variabili categoriali", options=cat_vars, default=cat_vars[:2], key=k("sel_cat"))
 
@@ -102,69 +102,34 @@ else:
     tabs = st.tabs(["🔢 Numeriche", "🔠 Categoriali"])
 
     # ==============================
-    # NUMERICHE
+    # NUMERICHE (menu a tendina)
     # ==============================
     with tabs[0]:
         if sel_num:
-            for var_num in sel_num:
-                st.markdown(f"### 🔢 {var_num}")
+            active_num = st.selectbox("Variabile numerica da visualizzare", options=sel_num, key=k("active_num"))
 
-                left, right = st.columns(2, vertical_alignment="top")
+            hue = st.selectbox("Colore per sottogruppo (opzionale)", options=["(nessuno)"] + cat_vars, key=k("hue"))
+            hue = None if hue == "(nessuno)" else hue
 
-                with left:
-                    nbins = st.slider(
-                        f"Numero bin per {var_num}", 10, 100, 30, 5, key=k(f"bins_{var_num}")
-                    )
-                    hue = st.selectbox(
-                        f"Colore per sottogruppo ({var_num})",
-                        options=["(nessuno)"] + cat_vars,
-                        key=k(f"hue_{var_num}")
-                    )
-                    hue = None if hue == "(nessuno)" else hue
+            nbins = st.slider("Numero di bin (istogramma)", 10, 100, 30, 5, key=k("nbins"))
+            style = st.selectbox("Secondo grafico", ["Boxplot", "Violin"], key=k("style"))
 
-                    fig_hist = px.histogram(
-                        df,
-                        x=var_num,
-                        color=hue,
-                        nbins=nbins,
-                        template="simple_white",
-                    )
-                    fig_hist.update_layout(
-                        title=f"Istogramma di {var_num}",
-                        height=400,
-                        margin=dict(l=10, r=10, t=50, b=10),
-                        font=dict(size=14)
-                    )
-                    st.plotly_chart(fig_hist, use_container_width=True)
+            left, right = st.columns(2, vertical_alignment="top")
 
-                with right:
-                    style = st.selectbox(
-                        f"Tipo grafico ({var_num})",
-                        ["Boxplot", "Violin"],
-                        key=k(f"style_{var_num}")
-                    )
-                    if style == "Boxplot":
-                        fig_box = px.box(
-                            df, y=var_num, color=hue, points="all", template="simple_white"
-                        )
-                        fig_box.update_layout(
-                            title=f"Boxplot di {var_num}",
-                            height=400,
-                            margin=dict(l=10, r=10, t=50, b=10),
-                            font=dict(size=14)
-                        )
-                        st.plotly_chart(fig_box, use_container_width=True)
-                    else:
-                        fig_violin = px.violin(
-                            df, y=var_num, color=hue, box=True, points="all", template="simple_white"
-                        )
-                        fig_violin.update_layout(
-                            title=f"Violin plot di {var_num}",
-                            height=400,
-                            margin=dict(l=10, r=10, t=50, b=10),
-                            font=dict(size=14)
-                        )
-                        st.plotly_chart(fig_violin, use_container_width=True)
+            with left:
+                fig_hist = px.histogram(df, x=active_num, color=hue, nbins=nbins, template="simple_white")
+                fig_hist.update_layout(title=f"Istogramma di {active_num}", height=400, font=dict(size=14))
+                st.plotly_chart(fig_hist, use_container_width=True)
+
+            with right:
+                if style == "Boxplot":
+                    fig_box = px.box(df, y=active_num, color=hue, points="all", template="simple_white")
+                    fig_box.update_layout(title=f"Boxplot di {active_num}", height=400, font=dict(size=14))
+                    st.plotly_chart(fig_box, use_container_width=True)
+                else:
+                    fig_violin = px.violin(df, y=active_num, color=hue, box=True, points="all", template="simple_white")
+                    fig_violin.update_layout(title=f"Violin plot di {active_num}", height=400, font=dict(size=14))
+                    st.plotly_chart(fig_violin, use_container_width=True)
         else:
             st.info("Nessuna variabile numerica selezionata.")
 
@@ -173,33 +138,14 @@ else:
     # ==============================
     with tabs[1]:
         if sel_cat:
-            top_row = st.columns([2, 1, 1, 1])
-            with top_row[0]:
-                var_cat = st.selectbox("Variabile categoriale", options=sel_cat, key=k("plot_cat"))
-            with top_row[1]:
-                show_mode = st.selectbox("Misura", ["Conteggi", "Percentuali"], key=k("measure"))
-            with top_row[2]:
-                top_n = st.number_input("Top N (0 = tutte)", min_value=0, value=0, step=1, key=k("topn"))
-            with top_row[3]:
-                orient = st.selectbox("Orientamento", ["Verticale", "Orizzontale"], key=k("orient"))
+            var_cat = st.selectbox("Variabile categoriale da visualizzare", options=sel_cat, key=k("plot_cat"))
+            show_mode = st.selectbox("Misura", ["Conteggi", "Percentuali"], key=k("measure"))
+            orient = st.selectbox("Orientamento", ["Verticale", "Orizzontale"], key=k("orient"))
 
-            order_mode = st.selectbox("Ordina per", ["Frequenza ↓", "Etichetta A→Z"], key=k("ord"))
-
-            # Frequenze
             ser = df[var_cat]
             freq = ser.value_counts(dropna=False).reset_index(name="count").rename(columns={"index": var_cat})
             freq[var_cat] = freq[var_cat].astype(str)
             freq["percent"] = freq["count"] / len(df) * 100
-
-            # Ordine
-            if order_mode == "Frequenza ↓":
-                freq = freq.sort_values("count", ascending=False)
-            else:
-                freq = freq.sort_values(var_cat, ascending=True)
-
-            # Top N
-            if top_n and top_n > 0:
-                freq = freq.head(top_n)
 
             if show_mode == "Percentuali":
                 y_col = "percent"; y_title = "Percentuale"; textfmt = "%{text:.1f}%"
@@ -208,32 +154,24 @@ else:
 
             if orient == "Verticale":
                 fig_cat = px.bar(freq, x=var_cat, y=y_col, text=y_col, template="simple_white")
-                fig_cat.update_traces(texttemplate=textfmt, textposition="outside", cliponaxis=False)
+                fig_cat.update_traces(texttemplate=textfmt, textposition="outside")
             else:
                 fig_cat = px.bar(freq, x=y_col, y=var_cat, text=y_col, orientation="h", template="simple_white")
-                fig_cat.update_traces(texttemplate=textfmt, textposition="outside", cliponaxis=False)
+                fig_cat.update_traces(texttemplate=textfmt, textposition="outside")
 
-            fig_cat.update_layout(
-                title=f"Distribuzione di {var_cat}",
-                yaxis_title=y_title if orient == "Verticale" else None,
-                xaxis_title=None if orient == "Verticale" else y_title,
-                height=520,
-                margin=dict(l=10, r=10, t=60, b=10),
-                font=dict(size=16),
-            )
+            fig_cat.update_layout(title=f"Distribuzione di {var_cat}", height=520, font=dict(size=16))
             st.plotly_chart(fig_cat, use_container_width=True)
         else:
             st.info("Nessuna variabile categoriale selezionata.")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Passo 4 · Esportazione
+# Passo 4 · Esportazione + Navigazione
 # ──────────────────────────────────────────────────────────────────────────────
-st.subheader("Passo 4 · Esportazione")
+st.subheader("Passo 4 · Esportazione e navigazione")
+
 csv_bytes = df.to_csv(index=False).encode("utf-8")
-st.download_button(
-    "⬇️ Scarica CSV corrente",
-    data=csv_bytes,
-    file_name="dataset_corrente.csv",
-    mime="text/csv",
-    key=k("download")
-)
+st.download_button("⬇️ Scarica CSV corrente", data=csv_bytes, file_name="dataset_corrente.csv", mime="text/csv", key=k("download"))
+
+st.markdown("---")
+if st.button("➡️ Vai a: Explore Distributions", key=k("go_next"), use_container_width=True):
+    st.switch_page("pages/3_📊_Explore_Distributions.py")
