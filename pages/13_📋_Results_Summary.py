@@ -15,43 +15,47 @@ except Exception:
     _HAS_MD = False
 
 # ===========================================================
-# Setup
+# Setup & stile globale
 # ===========================================================
+st.set_page_config(page_title="Results Summary", layout="wide")
 init_state()
 st.title("📋 Results Summary — Dashboard a card")
+
+# Larghezza container e stile card
+st.markdown("""
+<style>
+.block-container {max-width: 1400px; padding-top: 1rem; padding-bottom: 1rem;}
+.card {border-radius:16px; padding:16px; margin-bottom:16px; box-shadow:0 2px 12px rgba(0,0,0,.06);}
+.card h4{margin:0 0 6px 0}
+.meta{color:#616161; font-size:.85em; margin-bottom:6px}
+.pill{display:inline-block; padding:4px 10px; border-radius:999px; background:#eef1f4; margin-right:6px; font-size:.85em}
+.kpi{font-weight:600}
+</style>
+""", unsafe_allow_html=True)
 
 # Archivio risultati in sessione
 if "report_items" not in st.session_state or not isinstance(st.session_state.report_items, list):
     st.session_state.report_items = []
 
-# Stato locale per note, selezione, pin e ordinamento
-st.session_state.setdefault("rs_notes", {})       # id -> testo nota
-st.session_state.setdefault("rs_selected", set()) # ids inclusi nel report
-st.session_state.setdefault("rs_pinned", set())   # ids evidenziati
-st.session_state.setdefault("rs_order", {})       # id -> int
-
-# Backfill campi minimi
+# Backfill campi minimi e metadati persistenti
 for it in st.session_state.report_items:
     it.setdefault("id", str(uuid.uuid4()))
     it.setdefault("created_at", dt.datetime.now().isoformat(timespec="seconds"))
     it.setdefault("title", it.get("type", "Item"))
     it.setdefault("content", {})
+    # metadati persistenti per la relazione
+    meta = it.setdefault("_rs_meta", {})  # <- QUI si salvano note/selezione/pin/ordine
+    meta.setdefault("note", "")
+    meta.setdefault("selected", False)
+    meta.setdefault("pinned", False)
+    # default d’ordine per sezione (vedi mapping sotto)
+    # lo impostiamo dopo aver risolto la sezione
 
 items = st.session_state.report_items
 
 # ===========================================================
-# Stili e mapping
+# Mapping stile/sezione/ordine
 # ===========================================================
-st.markdown("""
-<style>
-.card {border-radius:16px; padding:14px; margin-bottom:14px; box-shadow:0 2px 10px rgba(0,0,0,.06);}
-.card h4{margin:0 0 6px 0}
-.meta{color:#616161; font-size:.85em; margin-bottom:6px}
-.pill{display:inline-block; padding:3px 10px; border-radius:999px; background:#eef1f4; margin-right:6px; font-size:.8em}
-.kpi{font-weight:600}
-</style>
-""", unsafe_allow_html=True)
-
 TYPE_STYLE = {
     "regression_ols":               ("🧮", "#e8f5e9"),
     "regression_logit":             ("🧮", "#e8f5e9"),
@@ -91,6 +95,11 @@ DEFAULT_SECTION_ORDER = {
 
 def _icon_bg(item_type: str):
     return TYPE_STYLE.get(item_type, ("🗂️", "#f5f5f5"))
+
+# Imposta order di default nei metadati se mancante
+for it in items:
+    sec = SECTION_OF.get(it.get("type",""), "Altri risultati")
+    it["_rs_meta"].setdefault("order", DEFAULT_SECTION_ORDER.get(sec, 99))
 
 # ===========================================================
 # Helpers per sintesi e anteprima
@@ -209,28 +218,23 @@ filtered = [it for it in items
             and (query.lower() in it.get("title", "").lower())]
 
 # ===========================================================
-# Card grid (2 colonne)
+# Card grid (2 colonne ampie)
 # ===========================================================
 st.subheader("Risultati")
 if not filtered:
     st.info("Nessun elemento corrisponde ai filtri.")
 else:
-    cols = st.columns(2)  # <-- due colonne
+    cols = st.columns([1, 1])  # due colonne uguali ma con container wide
     for idx, it in enumerate(filtered):
-        col = cols[idx % 2]  # <-- modulo 2
+        col = cols[idx % 2]
         with col:
             icon, bg = _icon_bg(it.get("type", ""))
             sec = SECTION_OF.get(it.get("type", ""), "Altri risultati")
             _id = it["id"]
-
-            # Stato locale correntemente memorizzato
-            note = st.session_state["rs_notes"].get(_id, "")
-            selected = _id in st.session_state["rs_selected"]
-            pinned = _id in st.session_state["rs_pinned"]
-            order_val = st.session_state["rs_order"].get(_id, DEFAULT_SECTION_ORDER.get(sec, 99))
+            meta = it["_rs_meta"]  # <- metadati persistenti
 
             st.markdown(f"<div class='card' style='background:{bg}'>", unsafe_allow_html=True)
-            cTop, cBtns = st.columns([4, 2])
+            cTop, cBtns = st.columns([5, 2])  # più spazio al testo
             with cTop:
                 st.markdown(f"### {icon} {it.get('title','(senza titolo)')}")
                 st.markdown(f"<div class='meta'>{sec} • {it.get('created_at','')}</div>", unsafe_allow_html=True)
@@ -238,9 +242,10 @@ else:
                 if line:
                     st.markdown(f"<span class='pill kpi'>{line}</span>", unsafe_allow_html=True)
             with cBtns:
-                st.checkbox("Includi nel report", key=f"sel_{_id}", value=selected)
-                st.checkbox("Pin (highlight)", key=f"pin_{_id}", value=pinned)
-                st.number_input("Ordine", key=f"ord_{_id}", min_value=1, max_value=99, value=order_val, step=1)
+                sel = st.checkbox("Includi", key=f"sel_{_id}", value=meta.get("selected", False), help="Includi nel report")
+                pin = st.checkbox("Pin", key=f"pin_{_id}", value=meta.get("pinned", False), help="Evidenzia nel report")
+                ordv = st.number_input("Ordine", key=f"ord_{_id}", min_value=1, max_value=99,
+                                       value=int(meta.get("order", DEFAULT_SECTION_ORDER.get(sec, 99))), step=1)
 
             # Anteprima compatta
             with st.expander("Anteprima tabellare", expanded=False):
@@ -250,26 +255,20 @@ else:
                 else:
                     st.info("Anteprima non disponibile per questo elemento.")
 
-            # Nota interpretativa (entra nel report)
-            st.text_area(
+            # Nota interpretativa (entra nel report) — PERSISTENTE
+            nota = st.text_area(
                 "Nota/interpretazione (includi nel report)",
-                value=note,
+                value=meta.get("note", ""),
                 key=f"note_{_id}",
-                height=80
+                height=90
             )
             st.markdown("</div>", unsafe_allow_html=True)
 
-            # Sync stato in sessione (post-render)
-            st.session_state["rs_notes"][_id] = st.session_state[f"note_{_id}"]
-            if st.session_state[f"sel_{_id}"]:
-                st.session_state["rs_selected"].add(_id)
-            else:
-                st.session_state["rs_selected"].discard(_id)
-            if st.session_state[f"pin_{_id}"]:
-                st.session_state["rs_pinned"].add(_id)
-            else:
-                st.session_state["rs_pinned"].discard(_id)
-            st.session_state["rs_order"][_id] = st.session_state[f"ord_{_id}"]
+            # ======= PERSISTENZA METADATI NELL'ITEM =======
+            meta["selected"] = bool(sel)
+            meta["pinned"] = bool(pin)
+            meta["order"] = int(ordv)
+            meta["note"] = str(nota)
 
 st.divider()
 
@@ -285,16 +284,15 @@ with colC1:
 with colC2:
     rpt_summary = st.text_area("Abstract / Sintesi iniziale (opzionale)", height=120)
 
-# Raccoglie elementi selezionati
-sel_ids = list(st.session_state["rs_selected"])
-chosen = [it for it in items if it["id"] in sel_ids]
+# Raccoglie elementi selezionati dai metadati PERSISTENTI
+chosen = [it for it in items if it["_rs_meta"].get("selected", False)]
 
 # Ordinamento: pin (prima), ordine sezione, ordine manuale, titolo
 def _sort_key(it):
     sec = SECTION_OF.get(it.get("type", ""), "Altri risultati")
     base = DEFAULT_SECTION_ORDER.get(sec, 99)
-    pin_bonus = 0 if it["id"] in st.session_state["rs_pinned"] else 1
-    manual = st.session_state["rs_order"].get(it["id"], base)
+    pin_bonus = 0 if it["_rs_meta"].get("pinned", False) else 1
+    manual = it["_rs_meta"].get("order", base)
     return (pin_bonus, base, manual, it.get("title", ""))
 
 chosen = sorted(chosen, key=_sort_key)
@@ -343,8 +341,8 @@ def _build_markdown(title, author, affil, abstract, items_sel):
             tab = _preview_table(it)
             if not tab.empty:
                 md += ["", _md_table(tab.round(4))]
-            # Nota interpretativa
-            note = st.session_state["rs_notes"].get(it["id"], "").strip()
+            # Nota interpretativa (presa dai metadati dell'item)
+            note = it["_rs_meta"].get("note", "").strip()
             if note:
                 md += ["", "**Nota/interpretazione**", note]
             md.append("")
@@ -379,8 +377,10 @@ with colD2:
         html_full = "<pre style='white-space:pre-wrap'>" + md_text + "</pre>"
     st.download_button("⬇️ Scarica HTML", data=html_full, file_name="relazione_statistica.html", mime="text/html")
 with colD3:
+    # Export JSON include ANCHE i metadati persistenti _rs_meta
     payload = json.dumps(items, ensure_ascii=False, indent=2)
-    st.download_button("⬇️ Esporta archivio JSON", data=payload, file_name="results_summary_archive.json", mime="application/json")
+    st.download_button("⬇️ Esporta archivio JSON", data=payload,
+                       file_name="results_summary_archive.json", mime="application/json")
 
 # ===========================================================
 # Manutenzione
@@ -393,9 +393,8 @@ with st.expander("Operazioni di manutenzione", expanded=False):
             st.success("Archivio svuotato.")
             st.stop()
     with c2:
-        if st.button("🔄 Cancella selezioni/ordini locali"):
-            st.session_state["rs_notes"] = {}
-            st.session_state["rs_selected"] = set()
-            st.session_state["rs_pinned"] = set()
-            st.session_state["rs_order"] = {}
-            st.success("Impostazioni locali azzerate.")
+        if st.button("🔄 Azzera metadati (note/pin/ordine/selected)"):
+            for it in st.session_state.report_items:
+                it["_rs_meta"] = {"note":"", "selected":False, "pinned":False,
+                                  "order": DEFAULT_SECTION_ORDER.get(SECTION_OF.get(it.get("type",""),"Altri risultati"), 99)}
+            st.success("Metadati azzerati.")
