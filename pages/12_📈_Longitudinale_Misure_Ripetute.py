@@ -116,7 +116,7 @@ def _spaghetti_plot(df_long, id_col, time_col, y_col, max_ids=60):
 # Pagina
 # ===========================================================
 init_state()
-st.title("📈 Analisi Longitudinale (misure ripetute)")
+st.title("📈 Analisi Longitudinale (Dati longitudinali - Misure ripetute)")
 
 # Presenza dataset
 if "df" not in st.session_state or st.session_state.df is None:
