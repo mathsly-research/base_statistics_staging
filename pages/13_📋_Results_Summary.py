@@ -209,15 +209,15 @@ filtered = [it for it in items
             and (query.lower() in it.get("title", "").lower())]
 
 # ===========================================================
-# Card grid (3 colonne via st.columns)
+# Card grid (2 colonne)
 # ===========================================================
 st.subheader("Risultati")
 if not filtered:
     st.info("Nessun elemento corrisponde ai filtri.")
 else:
-    cols = st.columns(3)
+    cols = st.columns(2)  # <-- due colonne
     for idx, it in enumerate(filtered):
-        col = cols[idx % 3]
+        col = cols[idx % 2]  # <-- modulo 2
         with col:
             icon, bg = _icon_bg(it.get("type", ""))
             sec = SECTION_OF.get(it.get("type", ""), "Altri risultati")
@@ -369,7 +369,7 @@ with colD1:
     st.download_button("⬇️ Scarica Markdown", data=md_text, file_name="relazione_statistica.md", mime="text/markdown")
 with colD2:
     if _HAS_MD:
-        html_body = mdconv.markdown(md_text, extensions=['tables', 'fenced_code'])
+        html_body = mdconv.markdown(md_text, extensions=['tables','fenced_code'])
         html_full = f"""<!doctype html><html><head><meta charset="utf-8">
         <style>
         body{{font-family:-apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin:40px}}
