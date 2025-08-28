@@ -10,7 +10,7 @@ import unicodedata
 # ------------------------------
 # Configurazione di pagina
 # ------------------------------
-st.set_page_config(page_title="🧹 Pulizia Dati", layout="wide")
+st.set_page_config(page_title="Pulizia Dati", layout="wide")
 
 # ------------------------------
 # Utility chiavi univoche e stato
