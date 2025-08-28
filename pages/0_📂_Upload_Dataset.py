@@ -1,120 +1,290 @@
-# -*- coding: utf-8 -*-
+# pages/0_📂_Upload_Dataset.py
+from __future__ import annotations
+
+import io
 import streamlit as st
 import pandas as pd
-from pathlib import Path
 
-from core.state import init_state
+# ──────────────────────────────────────────────────────────────────────────────
+# Configurazione pagina
+# ──────────────────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="📂 Carica dataset", layout="wide")
 
-# ---------------------------------
-# Init
-# ---------------------------------
-init_state()
-st.title("📂 Step 0 — Upload Dataset")
+# Menu laterale (se presente)
+try:
+    from nav import sidebar
+    sidebar()
+except Exception:
+    pass  # la pagina funziona anche senza nav.py
 
-# ---------------------------------
-# Upload file
-# ---------------------------------
-uploaded_file = st.file_uploader("Carica il tuo dataset (CSV o Excel)", type=["csv", "xlsx"])
+# ──────────────────────────────────────────────────────────────────────────────
+# Utility
+# ──────────────────────────────────────────────────────────────────────────────
+KEY = "up"  # prefisso chiavi per evitare collisioni
 
-if uploaded_file is not None:
-    try:
-        if uploaded_file.name.endswith(".csv"):
-            df = pd.read_csv(uploaded_file)
-        else:
-            df = pd.read_excel(uploaded_file)
+def k(name: str) -> str:
+    return f"{KEY}_{name}"
 
-        # Salvataggio nel session state
-        st.session_state.df = df.copy()
-        st.session_state.df_original = df.copy()   # sempre intatto
-        st.session_state.df_working = df.copy()    # usato per cleaning/filtri
+def ss_get(name: str, default=None):
+    return st.session_state.get(name, default)
 
-        st.success(f"✅ Dataset caricato correttamente: {df.shape[0]} righe × {df.shape[1]} colonne")
+def ss_set_default(name: str, value):
+    if name not in st.session_state:
+        st.session_state[name] = value
 
-        # Preview
-        st.subheader("Anteprima dataset")
-        st.dataframe(df.head(), use_container_width=True)
+# Stato iniziale sicuro
+ss_set_default(k("df"), None)
+ss_set_default(k("source"), None)          # 'upload' | 'sample'
+ss_set_default(k("encoding"), "utf-8")
+ss_set_default(k("decimal"), ",")          # default europeo
+ss_set_default(k("thousands"), ".")        # default europeo
+ss_set_default(k("saved_ok"), False)
 
-        # Info variabili
-        st.subheader("📋 Informazioni sulle variabili")
-        info = pd.DataFrame({
-            "Colonna": df.columns,
-            "Tipo": [str(df[c].dtype) for c in df.columns],
-            "Valori unici": [df[c].nunique() for c in df.columns],
-            "Missing": [df[c].isna().sum() for c in df.columns]
-        })
-        st.dataframe(info, use_container_width=True)
-
-    except Exception as e:
-        st.error(f"Errore durante la lettura del file: {e}")
-
-else:
-    st.info("Carica un file per iniziare.")
-
-# ---------------------------------
-# Navigazione agli step successivi
-# ---------------------------------
-
-# Stile: pulsanti più bassi (altezza ridotta)
-st.markdown("""
-<style>
-.nav-card {
-  border-radius: 14px; padding: 14px; margin-bottom: 16px;
-  text-align: center; box-shadow: 2px 2px 10px rgba(0,0,0,0.08);
-}
-.nav-emoji { font-size: 34px; margin-bottom: 4px; }
-.nav-title { margin: 2px 0 2px 0; color: #333; }
-.nav-desc { margin: 0 0 8px 0; color: #555; font-size: 0.9em; }
-.nav-btn {
-  background-color: #4CAF50; color: white;
-  padding: 4px 12px;         /* più stretto in altezza */
-  line-height: 1.0;          /* riduce l'altezza del bottone */
-  border: none; border-radius: 10px; cursor: pointer; font-size: 0.9em;
-}
-.nav-btn:hover { filter: brightness(0.95); }
-</style>
-""", unsafe_allow_html=True)
-
-def _exists(rel_path: str) -> str | None:
-    """Ritorna il path se esiste, altrimenti None."""
-    return rel_path if Path(rel_path).exists() else None
-
-# Card: (path, icon, title, desc, bgcolor)
-PAGES = [
-    ("pages/1_🧹_Data_Cleaning.py",                  "🧹", "Data Cleaning",          "Gestione missing values e filtri", "#e6f7ff"),
-    ("pages/2_📈_Descriptive_Statistics.py",         "📈", "Statistiche Descrittive",       "Statistiche di base e riepilogo variabili", "#fff5e6"),
-    ("pages/3_📊_Explore_Distributions.py",          "📊", "Analisi Distribuzioni",     "Istogrammi, boxplot e violino", "#f9e6ff"),
-    ("pages/4_🔍_Assumption_Checks.py",              "🔍", "Verifica Assunzioni",        "Verifica normalità e omoscedasticità", "#e6ffe6"),
-    ("pages/5_🧪_Statistical_Tests.py",              "🧪", "Test statistici",   "Confronti parametrici e non parametrici", "#fff0f0"),
-    ("pages/6_🔗_Correlation_Analysis.py",           "🔗", "Analisi Correlazioni",      "Relazioni tra variabili e heatmap", "#f0f5ff"),
-    ("pages/7_📂_Subgroup_Analysis.py",              "📂", "Analisi Sottogruppi",       "Confronti e descrittive per sottogruppi", "#eef7ff"),
-    ("pages/8_🧱_Regression.py",                     "🧱", "Analisi Regressione",       "Lineare, Logistica, Poisson", "#e8f5e9"),
-    ("pages/9_🧪_Analisi_Test_Diagnostici.py",       "🔬", "Test diagnostici",  "Sens., Spec., LR, ROC/PR, DCA, Calibrazione", "#fff7e6"),
-    ("pages/10_📏_Agreement.py",                     "📏", "Valutazione Agreement",         "Bland–Altman, CCC, Deming, ICC, Kappa", "#e6f0ff"),
-    ("pages/11_📈_Analisi_di_Sopravvivenza.py",      "🧭", "Analisi di Sopravvivenza",     "KM, Nelson–Aalen, Cox PH, AFT", "#f0fff0"),
-    ("pages/12_📈_Longitudinale_Misure_Ripetute.py", "📉", "Dati Longitudinali",     "LMM (RI/RS) e GEE, diagnostica", "#f0f8ff"),
-    ("pages/13_📘_Glossary.py",                      "📘", "Glossario",         "Termini usati nell’app e definizioni", "#eef5ff"),
-]
-
-st.divider()
-st.subheader("🚀 Navigazione rapida agli step")
-
-cols = st.columns(2)  # due colonne
-i = 0
-for page_path, icon, title, desc, color in PAGES:
-    page_path = _exists(page_path)
-    if page_path is None:
-        continue
-
-    card_html = f"""
-    <div class="nav-card" style="background-color:{color};">
-        <div class="nav-emoji">{icon}</div>
-        <h3 class="nav-title">{title}</h3>
-        <p class="nav-desc">{desc}</p>
-        <a href='/{page_path}' target='_self' style='text-decoration:none;'>
-            <button class="nav-btn">Vai →</button>
-        </a>
-    </div>
+# ──────────────────────────────────────────────────────────────────────────────
+# Header
+# ──────────────────────────────────────────────────────────────────────────────
+st.title("📂 Importa Dataset")
+st.markdown(
     """
-    with cols[i % 2]:
-        st.markdown(card_html, unsafe_allow_html=True)
-    i += 1
+**Obiettivo:** caricare un file (CSV/Excel), verificare rapidamente struttura e qualità, quindi
+**salvare il dataset** per le pagine successive.
+
+Proceda in tre passi: 1) Sorgente dati → 2) Opzioni di lettura → 3) Anteprima e salvataggio.
+"""
+)
+
+# Barra di avanzamento semplificata
+steps = ["Sorgente", "Opzioni", "Anteprima/Salva"]
+progress = 0
+if ss_get(k("df")) is not None:
+    progress = 2
+st.progress((progress+1)/len(steps), text=f"Passo {progress+1} di {len(steps)} · {steps[progress]}")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Passo 1 · Sorgente dati
+# ──────────────────────────────────────────────────────────────────────────────
+st.subheader("Passo 1 · Sorgente dati")
+
+c1, c2 = st.columns([2, 3], vertical_alignment="top")
+with c1:
+    source = st.radio(
+        "Selezioni la sorgente",
+        options=["Carica file", "Usa dataset di esempio"],
+        index=0 if ss_get(k("source")) != "sample" else 1,
+        key=k("source_radio"),
+        help="È possibile usare un piccolo dataset di esempio per provare l’app."
+    )
+
+with c2:
+    if source == "Carica file":
+        st.session_state[k("source")] = "upload"
+        uploaded = st.file_uploader(
+            "Carichi un file CSV o Excel",
+            type=["csv", "xlsx", "xls"],
+            key=k("uploader"),
+            help="Formati supportati: .csv, .xlsx, .xls"
+        )
+        if uploaded is not None:
+            st.success(f"File selezionato: **{uploaded.name}** ({uploaded.size/1024:.1f} KB)")
+            st.session_state[k("raw_file")] = uploaded
+            st.session_state[k("saved_ok")] = False
+    else:
+        st.session_state[k("source")] = "sample"
+        if st.button("Carica dataset di esempio (Iris)", key=k("load_sample"), use_container_width=True):
+            df_sample = pd.read_csv(
+                "https://raw.githubusercontent.com/mwaskom/seaborn-data/master/iris.csv"
+            )
+            st.session_state[k("df")] = df_sample.copy()
+            st.session_state[k("saved_ok")] = False
+            st.success("Dataset di esempio caricato.")
+            st.dataframe(df_sample.head(15), use_container_width=True)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Passo 2 · Opzioni di lettura
+# ──────────────────────────────────────────────────────────────────────────────
+st.subheader("Passo 2 · Opzioni di lettura")
+
+left, right = st.columns([3, 2])
+with left:
+    st.markdown("**Opzioni CSV** (ignorate per Excel)")
+    c_csv1, c_csv2, c_csv3 = st.columns(3)
+    with c_csv1:
+        enc = st.selectbox(
+            "Encoding",
+            options=["utf-8", "latin-1", "cp1252"],
+            index=["utf-8", "latin-1", "cp1252"].index(ss_get(k("encoding"))),
+            key=k("encoding"),
+            help="Se vede caratteri strani, provi un encoding diverso."
+        )
+    with c_csv2:
+        decimal = st.text_input("Separatore decimali", value=ss_get(k("decimal")), key=k("decimal"))
+    with c_csv3:
+        thousands = st.text_input("Separatore migliaia", value=ss_get(k("thousands")), key=k("thousands"))
+
+    sniff_sep = st.checkbox(
+        "Rileva automaticamente il separatore di campo (CSV)",
+        value=True,
+        key=k("sniff_sep"),
+        help="Abilitato: il separatore viene dedotto; Disabilitato: usa il punto e virgola ';' o la virgola ','."
+    )
+    if not ss_get(k("sniff_sep")):
+        sep = st.selectbox("Separatore", options=[",", ";", "\t", "|"], index=1, key=k("sep_fixed"))
+    else:
+        sep = None
+
+with right:
+    st.markdown("**Opzioni Excel**")
+    header_row = st.number_input("Riga header (Excel)", min_value=0, value=0, step=1, key=k("header_row"))
+    engine_xlsx = st.selectbox("Motore Excel", options=["auto", "openpyxl"], index=0, key=k("engine_xlsx"))
+
+# Pulsante di lettura
+read_btn = st.button("📥 Leggi/aggiorna dataset", key=k("read"), use_container_width=True)
+
+# Funzione di lettura robusta
+def read_uploaded_file(file) -> pd.DataFrame | None:
+    name = file.name.lower()
+    if name.endswith(".csv"):
+        # Strategie: 1) sep=None (sniffer) con encoding scelto; fallback a separatori comuni
+        data = file.read()
+        buf = io.BytesIO(data)
+        try:
+            if ss_get(k("sniff_sep"), True):
+                df = pd.read_csv(io.BytesIO(data), encoding=ss_get(k("encoding")), sep=None, engine="python")
+            else:
+                df = pd.read_csv(io.BytesIO(data), encoding=ss_get(k("encoding")),
+                                 sep=ss_get(k("sep_fixed", ",")))
+        except Exception:
+            # fallback: virgola
+            buf.seek(0)
+            df = pd.read_csv(buf, encoding=ss_get(k("encoding")), sep=",")
+        # Gestione decimali/migliaia opzionale
+        dec = ss_get(k("decimal"))
+        tho = ss_get(k("thousands"))
+        if dec in [",", "."] and tho in [",", ".", " "]:
+            # tenta conversione per colonne numeriche lette come stringa
+            for col in df.columns:
+                if df[col].dtype == "object":
+                    s = df[col].str.replace(tho, "", regex=False).str.replace(dec, ".", regex=False)
+                    try:
+                        num = pd.to_numeric(s, errors="ignore")
+                        if pd.api.types.is_numeric_dtype(num):
+                            df[col] = num
+                    except Exception:
+                        pass
+        return df
+
+    elif name.endswith((".xlsx", ".xls")):
+        # Apertura book e selezione foglio
+        try:
+            xls = pd.ExcelFile(file, engine=None if engine_xlsx == "auto" else engine_xlsx)
+            sheet = st.selectbox("Selezioni il foglio", options=xls.sheet_names, key=k("sheet_name"))
+            df = pd.read_excel(xls, sheet_name=sheet, header=ss_get(k("header_row", 0)))
+            return df
+        except Exception as e:
+            st.error(f"Errore lettura Excel: {e}")
+            return None
+    else:
+        st.error("Formato non supportato.")
+        return None
+
+if read_btn and ss_get(k("source")) == "upload":
+    up = ss_get(k("raw_file"))
+    if up is None:
+        st.warning("Nessun file selezionato.")
+    else:
+        df = read_uploaded_file(up)
+        if df is not None and not df.empty:
+            st.session_state[k("df")] = df.copy()
+            st.session_state[k("saved_ok")] = False
+            st.success(f"Dataset letto correttamente: {df.shape[0]} righe × {df.shape[1]} colonne.")
+        else:
+            st.error("Impossibile leggere il dataset o dataset vuoto.")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Passo 3 · Anteprima, controlli rapidi e salvataggio
+# ──────────────────────────────────────────────────────────────────────────────
+st.subheader("Passo 3 · Anteprima e salvataggio")
+
+df = ss_get(k("df"))
+if df is None:
+    st.info("Carichi o legga il dataset per proseguire.")
+    st.stop()
+
+# Riepilogo rapido
+m1, m2, m3, m4 = st.columns(4)
+with m1: st.metric("Righe", value=df.shape[0])
+with m2: st.metric("Colonne", value=df.shape[1])
+with m3: st.metric("Mancanti (tot)", value=int(df.isna().sum().sum()))
+with m4: st.metric("Numeriche / Categoriali", value=f"{sum(pd.api.types.is_numeric_dtype(df[c]) for c in df.columns)}/{df.shape[1]}")
+
+# Anteprima
+st.dataframe(df.head(25), use_container_width=True)
+
+# Controlli sintetici
+with st.expander("🔎 Controlli qualità sintetici", expanded=False):
+    cqa1, cqa2 = st.columns(2)
+    with cqa1:
+        dup_all = int(df.duplicated().sum())
+        st.write(f"• **Righe duplicate**: {dup_all}")
+        all_na = int((df.isna().all(axis=1)).sum())
+        st.write(f"• **Righe con tutti NA**: {all_na}")
+    with cqa2:
+        na_by_col = df.isna().sum().sort_values(ascending=False)
+        st.write("• **NA per colonna (top 10):**")
+        st.dataframe(na_by_col.head(10).to_frame("NA"), use_container_width=True, height=240)
+
+# Pulsanti di azione
+a1, a2, a3 = st.columns([1.5, 1.2, 1.2])
+with a1:
+    if st.button("💾 Salva dataset per le pagine successive", key=k("save"), use_container_width=True):
+        st.session_state["uploaded_df"] = df.copy()     # chiave principale usata dagli altri moduli
+        st.session_state["cleaned_df"] = df.copy()      # opzionale: disponibile anche come 'pulito'
+        st.session_state[k("saved_ok")] = True
+        st.success("Dataset salvato in `uploaded_df` (e `cleaned_df`).")
+
+with a2:
+    if st.button("🧹 Vai a: Pulizia dati", key=k("go_clean"), use_container_width=True):
+        if "uploaded_df" not in st.session_state:
+            st.session_state["uploaded_df"] = df.copy()
+        st.switch_page("pages/1_🧹_Data_Cleaning.py")
+
+with a3:
+    if st.button("📈 Vai a: Descrittive", key=k("go_desc"), use_container_width=True):
+        if "uploaded_df" not in st.session_state:
+            st.session_state["uploaded_df"] = df.copy()
+        st.switch_page("pages/2_📈_Descriptive_Statistics.py")
+
+st.markdown("---")
+
+# Strumenti utili
+tools1, tools2 = st.columns([1, 1])
+with tools1:
+    if st.button("♻️ Sostituisci dataset (reset)", key=k("reset"), use_container_width=True):
+        for key in [k("df"), k("raw_file"), k("saved_ok")]:
+            if key in st.session_state:
+                del st.session_state[key]
+        st.info("Reset eseguito. Selezioni un nuovo file o carichi il dataset di esempio.")
+with tools2:
+    # Download rapido del CSV così come caricato
+    try:
+        csv_bytes = df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇️ Scarica copia CSV",
+            data=csv_bytes,
+            file_name="dataset_importato.csv",
+            mime="text/csv",
+            key=k("download")
+        )
+    except Exception:
+        pass
+
+# Suggerimenti
+with st.expander("ℹ️ Suggerimenti per file CSV/Excel", expanded=False):
+    st.markdown(
+        """
+- Per CSV europei usare spesso **encoding UTF-8**, **decimale “,”** e **migliaia “.”**.  
+- Se i caratteri appaiono corrotti, provare **latin-1** o **cp1252**.  
+- Per Excel con più fogli, selezionare il *foglio* corretto nel menù dedicato.  
+- Dopo il salvataggio, le altre pagine leggeranno i dati da **`st.session_state['uploaded_df']`**.
+        """
+    )
