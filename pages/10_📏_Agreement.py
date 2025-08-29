@@ -66,7 +66,6 @@ def k(name: str) -> str:
 def confusion_from_series(a: pd.Series, b: pd.Series) -> pd.DataFrame:
     cats = sorted(pd.unique(pd.concat([a.dropna().astype(str), b.dropna().astype(str)])))
     cm = pd.crosstab(a.astype(str), b.astype(str), dropna=False)
-    # riallinea a tutte le categorie
     cm = cm.reindex(index=cats, columns=cats, fill_value=0)
     cm.index.name = "Rater A"; cm.columns.name = "Rater B"
     return cm
@@ -83,12 +82,11 @@ def cohen_kappa(cm: pd.DataFrame, weights: str | None = None) -> float:
     M = cm.to_numpy(dtype=float)
     n = M.sum()
     if n == 0: return float("nan")
-    p_obs = np.trace(M) / n
     r = M.sum(axis=1) / n
     c = M.sum(axis=0) / n
     k = M.shape[0]
 
-    # matrice pesi
+    # Matrice dei pesi W_ij
     if weights is None:
         W = np.eye(k)
     else:
@@ -109,23 +107,21 @@ def cohen_kappa(cm: pd.DataFrame, weights: str | None = None) -> float:
 
 def fleiss_kappa_from_raters(df_rat: pd.DataFrame) -> tuple[float, pd.DataFrame]:
     """
-    Fleiss' kappa per >=3 valutatori.
+    Fleiss' kappa per ≥3 valutatori.
     df_rat: colonne = valutatori, righe = soggetti; valori = categoria (stringa/numero).
     Restituisce (kappa, tabella N×K di conteggi per soggetto e categoria).
     """
-    # categorie complessive
     cats = sorted(pd.unique(df_rat.astype(str).stack()))
     cat_index = {c: i for i, c in enumerate(cats)}
     N = len(df_rat); k = len(cats)
-    # conta per riga
     count = np.zeros((N, k), dtype=float)
     for i, (_, row) in enumerate(df_rat.iterrows()):
         for val in row.dropna().astype(str):
             count[i, cat_index[val]] += 1.0
 
-    n_i = count.sum(axis=1)  # # raters per soggetto (si assume costante)
+    n_i = count.sum(axis=1)
     if not np.all(n_i == n_i[0]):
-        st.warning("Numero di valutatori non costante su tutti i soggetti: Fleiss' kappa richiede n fisso. Verranno escluse le righe con n diverso da quello più frequente.")
+        st.warning("Numero di valutatori non costante su tutti i soggetti: Fleiss' κ richiede n fisso. Verranno escluse le righe non conformi.")
         mode_n = pd.Series(n_i).mode().iat[0]
         keep = (n_i == mode_n)
         count = count[keep, :]
@@ -133,9 +129,8 @@ def fleiss_kappa_from_raters(df_rat: pd.DataFrame) -> tuple[float, pd.DataFrame]
         if count.shape[0] == 0:
             return float("nan"), pd.DataFrame(count, columns=cats)
 
-    n = n_i[0]  # raters per soggetto
+    n = n_i[0]
     N = count.shape[0]
-    # P_i per soggetto
     P_i = (1.0 / (n * (n - 1))) * (count * (count - 1)).sum(axis=1)
     P_bar = P_i.mean()
     p_j = count.sum(axis=0) / (N * n)
@@ -166,9 +161,8 @@ def icc_two_way(data: pd.DataFrame, kind: str = "agreement") -> float:
     mean_r = X.mean(axis=1, keepdims=True)
     mean_c = X.mean(axis=0, keepdims=True)
 
-    # SS
-    SSR = k * ((mean_r - grand)**2).sum()                # tra soggetti
-    SSC = n * ((mean_c - grand)**2).sum()                # tra valutatori
+    SSR = k * ((mean_r - grand)**2).sum()   # tra soggetti
+    SSC = n * ((mean_c - grand)**2).sum()   # tra valutatori
     SST = ((X - grand)**2).sum()
     SSE = SST - SSR - SSC
 
@@ -197,25 +191,68 @@ def lins_ccc(a: np.ndarray, b: np.ndarray) -> float:
     return float((2 * sxy) / (vx + vy + (mx - my)**2)) if (vx + vy + (mx - my)**2) != 0 else float("nan")
 
 def bland_altman_figure(a: pd.Series, b: pd.Series) -> tuple[go.Figure | None, dict]:
+    """Bland–Altman con linee orizzontali alle LoA e banda ombreggiata tra le LoA."""
     if go is None:
         return None, {}
+
     x = pd.to_numeric(a, errors="coerce")
     y = pd.to_numeric(b, errors="coerce")
     dfp = pd.DataFrame({"m": (x + y) / 2.0, "d": x - y}).dropna()
     if dfp.empty:
         return None, {}
+
     bias = float(dfp["d"].mean())
-    sd = float(dfp["d"].std(ddof=1))
-    loa_low = bias - 1.96 * sd
+    sd   = float(dfp["d"].std(ddof=1))
+    loa_low  = bias - 1.96 * sd
     loa_high = bias + 1.96 * sd
+
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=dfp["m"], y=dfp["d"], mode="markers", name="Differenze"))
-    fig.add_hline(y=bias, line_dash="solid", annotation_text=f"Bias = {bias:.3f}")
-    fig.add_hline(y=loa_low, line_dash="dash", annotation_text=f"LoA− = {loa_low:.3f}")
-    fig.add_hline(y=loa_high, line_dash="dash", annotation_text=f"LoA+ = {loa_high:.3f}")
-    fig.update_layout(template="simple_white", title="Bland–Altman",
-                      xaxis_title="Media dei due metodi", yaxis_title="Differenza (A − B)")
-    return fig, {"bias": bias, "sd": sd, "loa_low": loa_low, "loa_high": loa_high}
+
+    # Punti
+    fig.add_trace(go.Scatter(
+        x=dfp["m"], y=dfp["d"],
+        mode="markers",
+        marker=dict(size=7, opacity=0.75),
+        name="Differenze"
+    ))
+
+    # Banda tra le LoA (sotto ai punti)
+    fig.add_shape(
+        type="rect",
+        x0=float(dfp["m"].min()), x1=float(dfp["m"].max()),
+        y0=loa_low, y1=loa_high,
+        line=dict(width=0),
+        fillcolor="rgba(231, 76, 60, 0.10)", layer="below"
+    )
+
+    # Linee orizzontali: Bias e LoA ±1.96 SD
+    fig.add_hline(
+        y=bias, line_dash="solid", line_width=2, line_color="#2c3e50",
+        annotation_text=f"Bias = {bias:.3f}", annotation_position="top left"
+    )
+    fig.add_hline(
+        y=loa_low, line_dash="dash", line_width=2, line_color="#e74c3c",
+        annotation_text=f"LoA− (−1.96·SD) = {loa_low:.3f}", annotation_position="bottom left"
+    )
+    fig.add_hline(
+        y=loa_high, line_dash="dash", line_width=2, line_color="#e74c3c",
+        annotation_text=f"LoA+ (+1.96·SD) = {loa_high:.3f}", annotation_position="bottom left"
+    )
+
+    # Layout
+    fig.update_layout(
+        template="simple_white",
+        title="Bland–Altman",
+        xaxis_title="Media dei due metodi",
+        yaxis_title="Differenza (A − B)",
+        legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="left", x=0),
+        height=420,
+    )
+    fig.update_xaxes(showline=True, linewidth=2, linecolor="black")
+    fig.update_yaxes(showline=True, linewidth=2, linecolor="black")
+
+    stats = {"bias": bias, "sd": sd, "loa_low": loa_low, "loa_high": loa_high}
+    return fig, stats
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Header
@@ -278,7 +315,7 @@ if mode.startswith("Categoriali (2"):
     with st.expander("ℹ️ Come leggere (categoriali, 2 valutatori)"):
         st.markdown(
             "- **Matrice**: righe = A, colonne = B. L’accordo perfetto sta sulla diagonale.  \n"
-            "- **Cohen's κ**: corregge l’accordo per l’**accordo atteso per caso**; **pesi lineari/quadratici** sono consigliati per **scale ordinali**.  \n"
+            "- **Cohen's κ**: corregge l’accordo per l’**accordo atteso per caso**; **pesi lineari/quadratici** consigliati per **scale ordinali**.  \n"
             "- **% Accordo**: utile ma non tiene conto del caso; può essere fuorviante con classi sbilanciate."
         )
 
@@ -322,7 +359,6 @@ else:
         st.stop()
 
     st.markdown("### 2) Indici di accordo")
-    # ICC su due colonne → n×k con k=2
     icc_ag = icc_two_way(df_xy.rename(columns={x_col: "A", y_col: "B"}), kind="agreement")
     icc_con = icc_two_way(df_xy.rename(columns={x_col: "A", y_col: "B"}), kind="consistency")
     ccc = lins_ccc(df_xy.iloc[:, 0], df_xy.iloc[:, 1])
@@ -349,14 +385,14 @@ else:
         fig_ba, stats_ba = bland_altman_figure(df_xy.iloc[:, 0], df_xy.iloc[:, 1])
         if fig_ba is not None:
             st.plotly_chart(fig_ba, use_container_width=True)
-            st.caption(f"Bias={stats_ba['bias']:.3f}, LoA±1.96SD=({stats_ba['loa_low']:.3f}, {stats_ba['loa_high']:.3f})")
+            st.caption(f"Bias = {stats_ba['bias']:.3f} • LoA±1.96·SD = ({stats_ba['loa_low']:.3f}, {stats_ba['loa_high']:.3f})")
 
     with st.expander("ℹ️ Come leggere (continui, 2 metodi)"):
         st.markdown(
             "- **ICC(2,1)** valuta l’**accordo assoluto** considerando casuali sia i soggetti sia i valutatori.  \n"
             "- **ICC(3,1)** valuta la **coerenza** quando i valutatori sono fissi (ignora differenze di livello).  \n"
             "- **Lin’s CCC** combina correlazione e concordanza: 1 = perfetta identità lungo la bisettrice.  \n"
-            "- **Bland–Altman**: bias vicino a 0 e **LoA** strette indicano buona concordanza; verificare eventuale dipendenza dalla grandezza."
+            "- **Bland–Altman**: **linee orizzontali** a **Bias** e **LoA ±1.96·SD**; bias vicino a 0 e LoA strette indicano buona concordanza; controllare eventuale dipendenza dalla grandezza."
         )
 
 # ──────────────────────────────────────────────────────────────────────────────
