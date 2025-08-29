@@ -258,7 +258,7 @@ def bland_altman_figure(a: pd.Series, b: pd.Series) -> tuple[go.Figure | None, d
 # Header
 # ──────────────────────────────────────────────────────────────────────────────
 st.title("📏 Agreement")
-st.caption("Misure di accordo tra valutatori/metodi per dati **categoriali** e **continui**. Interfaccia guidata e spiegazioni.")
+st.caption("Misure di accordo tra valutatori/metodi per dati **categoriali** e **continui**. Interfaccia guidata e spiegazioni puntuali.")
 
 ensure_initialized()
 df = get_active(required=True)
@@ -287,6 +287,17 @@ if mode.startswith("Categoriali (2"):
 
     a = df[a_col].astype(str)
     b = df[b_col].astype(str)
+
+    # Guida rapida
+    with st.expander("ℹ️ Guida rapida (categoriali, 2 valutatori)", expanded=False):
+        st.markdown(
+            "- **Matrice di confusione**: accordo sulla **diagonale**; fuori-diagonale = disaccordi.  \n"
+            "- **% Accordo**: quota di casi in accordo; **non** corregge l’accordo atteso per caso.  \n"
+            "- **Cohen’s κ**: corregge per il caso; usare **pesi lineari/quadratici** con **scale ordinali**.  \n"
+            "- **Soglie orientative per κ** *(Landis & Koch)*: 0–0.20 scarso, 0.21–0.40 discreto, 0.41–0.60 moderato, 0.61–0.80 buono, 0.81–1.00 eccellente *(interpretare con prudenza e contesto)*.  \n"
+            "- **Attenzione**: κ può essere **sensibile alla prevalenza** delle categorie (paradosso di κ)."
+        )
+
     cm = confusion_from_series(a, b)
 
     st.markdown("### 2) Matrice di confusione")
@@ -307,16 +318,20 @@ if mode.startswith("Categoriali (2"):
 
     m1, m2 = st.columns(2)
     m1.metric("Cohen's κ", f"{kap:.3f}" if kap == kap else "—")
-    m1.caption("0: accordo al caso; 0.01–0.20 scarso; 0.21–0.40 discreto; 0.41–0.60 moderato; 0.61–0.80 buono; 0.81–1.00 eccellente (linee guida generiche).")
+    m1.caption("0: accordo al caso; →1: accordo perfetto. Valutare con la distribuzione delle categorie.")
     if show_pct:
         m2.metric("% Accordo", f"{pa*100:.1f}%")
-        m2.caption("Percentuale di osservazioni su cui i valutatori coincidono (non corregge per il caso).")
+        m2.caption("Quota di osservazioni coincidenti. **Non** corregge per l’accordo atteso per caso.")
 
-    with st.expander("ℹ️ Come leggere (categoriali, 2 valutatori)"):
+    with st.expander("📘 Come interpretare gli **indici** (2 valutatori)"):
         st.markdown(
-            "- **Matrice**: righe = A, colonne = B. L’accordo perfetto sta sulla diagonale.  \n"
-            "- **Cohen's κ**: corregge l’accordo per l’**accordo atteso per caso**; **pesi lineari/quadratici** consigliati per **scale ordinali**.  \n"
-            "- **% Accordo**: utile ma non tiene conto del caso; può essere fuorviante con classi sbilanciate."
+            "**Cohen’s κ**  \n"
+            "- Misura l’accordo corretto per il caso. κ=1 perfetto, κ=0 pari al caso, κ<0 peggio del caso.  \n"
+            "- **Pesi**: con scale ordinali gli errori ‘vicini’ pesano meno (lineari) o molto meno (quadratici).  \n"
+            "- **Prevalenza e bias** possono ridurre κ anche con % accordo elevata; usare % accordo come informazione complementare.\n\n"
+            "**% Accordo**  \n"
+            "- Semplice e intuitiva ma può **sovrastimare** l’accordo in presenza di categorie molto sbilanciate.  \n"
+            "- Usarla insieme a κ e alla matrice per capire **dove** avvengono i disaccordi."
         )
 
 # ========================= CATEGORIALI: ≥3 valutatori =========================
@@ -328,6 +343,13 @@ elif mode.startswith("Categoriali (≥3"):
         st.stop()
 
     df_rat = df[raters].copy()
+    with st.expander("ℹ️ Guida rapida (≥3 valutatori)", expanded=False):
+        st.markdown(
+            "- **Fleiss’ κ** generalizza κ di Cohen a **più valutatori**.  \n"
+            "- Richiede lo **stesso numero di valutazioni** per soggetto; in caso contrario vengono escluse le righe non conformi.  \n"
+            "- Interpretazione simile a Cohen’s κ; considerare anche la **distribuzione delle categorie**."
+        )
+
     kappa_f, tab = fleiss_kappa_from_raters(df_rat)
 
     st.markdown("### 2) Tabella conteggi per soggetto e categoria (input Fleiss)")
@@ -335,11 +357,13 @@ elif mode.startswith("Categoriali (≥3"):
 
     st.markdown("### 3) Fleiss' κ (≥3 valutatori)")
     st.metric("Fleiss' κ", f"{kappa_f:.3f}" if kappa_f == kappa_f else "—")
-    st.caption("0: accordo al caso; 1: accordo perfetto. Interpretabile come per Cohen's κ, ma esteso a più valutatori.")
-    with st.expander("ℹ️ Note"):
+    st.caption("0: accordo al caso; →1: accordo perfetto. Valutare insieme a distribuzione categorie e compito di rating.")
+
+    with st.expander("📘 Come interpretare **Fleiss’ κ**"):
         st.markdown(
-            "- Fleiss richiede **uguale numero di valutatori per soggetto**; in caso contrario sono escluse le righe non conformi.  \n"
-            "- Le categorie sono dedotte dalle modalità presenti nelle colonne selezionate."
+            "- κ aumenta quando i valutatori **convergono** sulle stesse categorie.  \n"
+            "- Con categorie **rare** o **sbilanciate**, la stima può essere attenuata (paradosso).  \n"
+            "- Soglie orientative (come per Cohen’s κ) vanno **contestualizzate** al dominio e al rischio degli errori."
         )
 
 # ================================ CONTINUI ====================================
@@ -358,6 +382,15 @@ else:
         st.error("Servono almeno due colonne numeriche con valori non mancanti.")
         st.stop()
 
+    with st.expander("ℹ️ Guida rapida (continui, 2 metodi)", expanded=False):
+        st.markdown(
+            "- **ICC(2,1)**: accordo **assoluto** (two-way *random*). Valido per generalizzare a valutatori simili.  \n"
+            "- **ICC(3,1)**: **consistency** (two-way *mixed*): ignora differenze sistematiche di livello tra valutatori.  \n"
+            "- **Lin’s CCC**: combina correlazione e accuratezza (penalizza bias di livello e scala).  \n"
+            "- **Scatter + OLS**: identifica bias di **scala** (pendenza ≠1).  \n"
+            "- **Bland–Altman**: evidenzia **bias medio** e **limiti di accordo (LoA)**; cercare trend della differenza vs media (bias proporzionale)."
+        )
+
     st.markdown("### 2) Indici di accordo")
     icc_ag = icc_two_way(df_xy.rename(columns={x_col: "A", y_col: "B"}), kind="agreement")
     icc_con = icc_two_way(df_xy.rename(columns={x_col: "A", y_col: "B"}), kind="consistency")
@@ -366,13 +399,13 @@ else:
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("ICC(2,1) — Agreement", f"{icc_ag:.3f}" if icc_ag == icc_ag else "—")
-    m1.caption("Due vie, effetti casuali, **assoluto** (accordo). 0–1, più alto è meglio.")
+    m1.caption("Due vie, effetti casuali, **accordo assoluto**. Soglie orientative: <0.50 scarso, 0.50–0.75 moderato, 0.75–0.90 buono, >0.90 eccellente.")
     m2.metric("ICC(3,1) — Consistency", f"{icc_con:.3f}" if icc_con == icc_con else "—")
-    m2.caption("Due vie, effetti fissi (valutatore fisso), **coerenza** (ignora bias di livello).")
+    m2.caption("Due vie, valutatori fissi, **coerenza** (ignora bias di livello). Stesse soglie orientative dell’ICC(2,1).")
     m3.metric("Lin's CCC", f"{ccc:.3f}" if ccc == ccc else "—")
-    m3.caption("Concordanza = correlazione × **accuratezza** (penalizza shift e scala).")
+    m3.caption("Concordanza = correlazione × accuratezza; 1 = identità perfetta. Valori >0.90 tipicamente ottimi.")
     m4.metric("r di Pearson", f"{r:.3f}" if r == r else "—")
-    m4.caption("**Non** è una misura di accordo: solo associazione lineare.")
+    m4.caption("Misura **associazione** lineare, **non** accordo. Un r alto non garantisce concordanza.")
 
     st.markdown("### 3) Grafici")
     g1, g2 = st.columns(2)
@@ -380,19 +413,40 @@ else:
         if px is not None:
             fig = px.scatter(df_xy, x=x_col, y=y_col, trendline="ols", template="simple_white",
                              title="Scatter con retta OLS")
+            fig.update_layout(xaxis_title=x_col, yaxis_title=y_col)
             st.plotly_chart(fig, use_container_width=True)
+            st.caption(
+                "Interpretazione: punti vicini alla **bisettrice** (y≈x) indicano accordo. "
+                "Una **pendenza** OLS diversa da 1 suggerisce **bias di scala**; "
+                "un **intercetta** distante da 0 suggerisce **bias di livello**."
+            )
     with g2:
         fig_ba, stats_ba = bland_altman_figure(df_xy.iloc[:, 0], df_xy.iloc[:, 1])
         if fig_ba is not None:
             st.plotly_chart(fig_ba, use_container_width=True)
-            st.caption(f"Bias = {stats_ba['bias']:.3f} • LoA±1.96·SD = ({stats_ba['loa_low']:.3f}, {stats_ba['loa_high']:.3f})")
+            st.caption(
+                f"Bland–Altman: **Bias**={stats_ba['bias']:.3f}, **LoA**±1.96·SD=({stats_ba['loa_low']:.3f}, {stats_ba['loa_high']:.3f}).  "
+                "L’**area** tra le LoA evidenzia l’intervallo atteso per ~95% delle differenze. "
+                "Verificare eventuale **trend** delle differenze con la media (bias proporzionale): in tal caso considerare **trasformazioni** "
+                "o modelli che tengano conto dell’eteroschedasticità."
+            )
 
-    with st.expander("ℹ️ Come leggere (continui, 2 metodi)"):
+    with st.expander("📘 Come interpretare gli **indici** (continui)"):
         st.markdown(
-            "- **ICC(2,1)** valuta l’**accordo assoluto** considerando casuali sia i soggetti sia i valutatori.  \n"
-            "- **ICC(3,1)** valuta la **coerenza** quando i valutatori sono fissi (ignora differenze di livello).  \n"
-            "- **Lin’s CCC** combina correlazione e concordanza: 1 = perfetta identità lungo la bisettrice.  \n"
-            "- **Bland–Altman**: **linee orizzontali** a **Bias** e **LoA ±1.96·SD**; bias vicino a 0 e LoA strette indicano buona concordanza; controllare eventuale dipendenza dalla grandezza."
+            "**ICC(2,1) — Agreement**  \n"
+            "- Valuta quanto i metodi forniscano **misure identiche** (accordo assoluto). Utile se i valutatori sono un **campione** da una popolazione più ampia.  \n"
+            "- Soglie (orientative): <0.50 **scarso**, 0.50–0.75 **moderato**, 0.75–0.90 **buono**, >0.90 **eccellente**.\n\n"
+            "**ICC(3,1) — Consistency**  \n"
+            "- Valuta la **coerenza** ignorando le differenze sistematiche di livello tra valutatori (es. uno misura sempre +2).  \n"
+            "- Indicata quando i valutatori sono **fissi** e interessa la coerenza interna.\n\n"
+            "**Lin’s CCC**  \n"
+            "- Integra correlazione e **accuratezza**: penalizza shift e cambi di scala.  \n"
+            "- 1 = identità perfetta; valori elevati indicano alta **concordanza** (spesso atteso >0.90 in contesti clinici).\n\n"
+            "**r di Pearson**  \n"
+            "- Misura **associazione** lineare, non l’accordo; due metodi possono essere fortemente correlati ma con **bias** rilevante.\n\n"
+            "**Bland–Altman**  \n"
+            "- **Bias**: media delle differenze (A−B). **LoA**: bias ±1.96·SD, atteso coprire ~95% delle differenze.  \n"
+            "- Valutare se le LoA sono **clinicamente accettabili**; controllare **trend** (bias proporzionale) e **varianza non costante**."
         )
 
 # ──────────────────────────────────────────────────────────────────────────────
