@@ -70,10 +70,25 @@ def k(name: str) -> str:
     return f"{KEY}_{name}"
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Utility numeriche e di sintesi
+# ──────────────────────────────────────────────────────────────────────────────
+def fmt_p(p: float | None) -> str:
+    if p is None or p != p:
+        return "—"
+    if p < 1e-4:
+        return "< 1e-4"
+    return f"{p:.4f}"
+
+def interpret_p(p: float | None, alpha: float = 0.05) -> str:
+    if p is None or p != p:
+        return "non conclusivo"
+    return "statisticamente significativo" if p < alpha else "non significativo"
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Utility: KM fallback (se lifelines assente), log-rank 2 gruppi, risk table
 # ──────────────────────────────────────────────────────────────────────────────
 def _km_curve_fallback(time: np.ndarray, event: np.ndarray):
-    """Restituisce (t, S(t)) step-wise senza CI."""
+    """Restituisce (t, S(t)) step-wise senza CI (fallback semplice)."""
     df = pd.DataFrame({"t": time, "e": event}).sort_values("t")
     df = df[df["t"].notna()]
     t_unique = np.sort(df.loc[df["e"] == 1, "t"].unique())
@@ -121,12 +136,17 @@ def _logrank_two_groups_fallback(t1, e1, t0, e0):
         p = math.exp(-chi2 / 2.0) if chi2 == chi2 else np.nan
     return float(chi2), float(p)
 
-def _numbers_at_risk(df: pd.DataFrame, time_col: str, event_col: str, group_col: str | None, cutpoints: list[float]):
+def _numbers_at_risk(df_: pd.DataFrame, time_col: str, event_col: str, group_col: str | None, cutpoints: list[float]):
+    """
+    Tabella 'numeri a rischio' ai cutpoints richiesti.
+    ATTENZIONE: df_ deve contenere la colonna group_col se group_col è non-None.
+    """
     out = []
     if group_col is None:
-        groups = [("Tutti", df)]
+        groups = [("Tutti", df_)]
     else:
-        groups = [(str(g), gdf) for g, gdf in df.groupby(group_col, dropna=False)]
+        # group_col deve ESISTERE in df_ → in questo modulo vale "group"
+        groups = [(str(g), gdf) for g, gdf in df_.groupby(group_col, dropna=False)]
     for gname, gdf in groups:
         t = pd.to_numeric(gdf[time_col], errors="coerce")
         at_risk = [(t >= cp).sum() for cp in cutpoints]
@@ -195,6 +215,8 @@ if work.empty:
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("### 2) Curve di Kaplan–Meier e test di log-rank")
 left, right = st.columns([1.6, 1.4])
+
+alpha = st.select_slider("Soglia di significatività (α)", options=[0.01, 0.05, 0.10], value=0.05, key=k("alpha"))
 
 with left:
     show_ci = st.checkbox("Mostra intervalli di confidenza 95%", value=True, key=k("km_ci"))
@@ -276,7 +298,8 @@ with right:
     st.markdown("**Statistiche riassuntive**")
     st.dataframe(tbl, use_container_width=True)
 
-    # Log-rank
+    # Log-rank (e memorizzo p-value per interpretazione)
+    p_logrank = None
     if group_col is not None:
         levels = list(work["group"].astype(str).unique())
         if len(levels) == 2:
@@ -284,14 +307,16 @@ with right:
             g1 = work[work["group"] == levels[1]]
             if _has_lifelines:
                 res = logrank_test(g0["time"], g1["time"], g0["event"], g1["event"])
-                st.metric("Log-rank (2 gruppi) — p-value", f"{res.p_value:.4f}")
+                p_logrank = float(res.p_value)
+                st.metric("Log-rank (2 gruppi) — p-value", fmt_p(p_logrank))
             else:
-                chi2, p = _logrank_two_groups_fallback(g1["time"].values, g1["event"].values,
-                                                       g0["time"].values, g0["event"].values)
-                st.metric("Log-rank (2 gruppi) — p-value", f"{p:.4f}" if p == p else "—")
+                _, p_logrank = _logrank_two_groups_fallback(g1["time"].values, g1["event"].values,
+                                                            g0["time"].values, g0["event"].values)
+                st.metric("Log-rank (2 gruppi) — p-value", fmt_p(p_logrank))
         elif len(levels) > 2 and _has_lifelines:
             res = multivariate_logrank_test(work["time"], work["group"], work["event"])
-            st.metric("Log-rank (k gruppi) — p-value", f"{res.p_value:.4f}")
+            p_logrank = float(res.p_value)
+            st.metric("Log-rank (k gruppi) — p-value", fmt_p(p_logrank))
             with st.expander("Confronti **pairwise** (Holm-Bonferroni)", expanded=False):
                 pairs = list(itertools.combinations(levels, 2))
                 rows = []
@@ -305,7 +330,7 @@ with right:
                 dfp["p_Holm"] = [min((m - i) * p, 1.0) for i, p in enumerate(dfp["p"])]
                 st.dataframe(dfp, use_container_width=True)
 
-# Numeri a rischio (tabella) — versione robusta senza errori di default
+# Numeri a rischio (tabella) — versione robusta e senza KeyError
 with st.expander("📊 Numeri a rischio (seleziona tempi)", expanded=False):
     tmin = float(work["time"].min()); tmax = float(work["time"].max())
     def r2(x): return float(np.round(x, 2))
@@ -331,7 +356,9 @@ with st.expander("📊 Numeri a rischio (seleziona tempi)", expanded=False):
                                options=options,
                                default=default_opts, key=k("risk_pts"))
     if cutpoints:
-        risk = _numbers_at_risk(work, "time", "event", group_col, cutpoints)
+        # ⚠️ qui passiamo 'group' se esiste, altrimenti None → evita KeyError
+        group_key = "group" if ("group" in work.columns) else None
+        risk = _numbers_at_risk(work, "time", "event", group_key, cutpoints)
         st.dataframe(risk.astype(int), use_container_width=True)
         st.caption("Valori mostrati: **numero di soggetti ancora a rischio** a ciascun tempo selezionato (censurati ed eventi pregressi esclusi).")
 
@@ -340,9 +367,35 @@ with st.expander("ℹ️ Come leggere KM, log-rank e N a rischio", expanded=Fals
         "- **S(t)**: probabilità di **non** aver avuto l’evento entro t (linea a gradini). Intervalli di confidenza (se mostrati) quantificano l’incertezza.  \n"
         "- **Mediana di sopravvivenza**: tempo per cui S(t)=0.5; se la curva resta >0.5 non è stimabile.  \n"
         "- **Tick di censura**: istanti di uscita dall’osservazione; non rappresentano eventi.  \n"
-        "- **Log-rank**: p-value piccolo ⇒ differenza globale tra le curve (assume **hazard proporzionali**); con più gruppi usare anche confronti **pairwise** con correzione.  \n"
+        "- **Log-rank**: p-value piccolo ⇒ differenza globale tra le curve (assume **hazard proporzionali**).  \n"
         "- **Numeri a rischio**: aiutano a valutare l’**affidabilità** della coda delle curve; valori molto bassi implicano stime **instabili**."
     )
+
+# Sintesi automatica risultati KM/log-rank
+with st.expander("📝 Interpretazione automatica — KM & log-rank", expanded=True):
+    bullets = []
+    if 'tbl' in locals() and isinstance(tbl, pd.DataFrame) and not tbl.empty:
+        try:
+            order = tbl.sort_values("Mediana").reset_index(drop=True)
+            med_txt = " • ".join([f"{row['Gruppo']}: mediana={row['Mediana']:.2f}" if pd.notnull(row['Mediana']) else f"{row['Gruppo']}: mediana n/d"
+                                  for _, row in order.iterrows()])
+            bullets.append(f"**Mediane** (se stimabili): {med_txt}.")
+        except Exception:
+            pass
+        try:
+            evt_txt = " • ".join([f"{row['Gruppo']}: eventi={int(row['Eventi'])}/N={int(row['N'])}" for _, row in tbl.iterrows()])
+            bullets.append(f"**Eventi/N** per gruppo: {evt_txt}.")
+        except Exception:
+            pass
+    if group_col is not None:
+        bullets.append(f"**Log-rank**: p = {fmt_p(p_logrank)} ⇒ {interpret_p(p_logrank, alpha)} (α = {alpha:.2f}).")
+    if 'risk' in locals() and isinstance(risk, pd.DataFrame):
+        low_n = (risk.min(axis=1) < 10).any()
+        if low_n:
+            bullets.append("Nella coda temporale alcuni gruppi hanno **N a rischio < 10**: interpretare con cautela le differenze oltre tali tempi.")
+    if not bullets:
+        bullets.append("Nessuna sintesi disponibile (fornire gruppi o risultati adeguati).")
+    st.markdown("\n\n".join([f"- {b}" for b in bullets]))
 
 # ──────────────────────────────────────────────────────────────────────────────
 # STEP 3 — Modello di Cox PH
@@ -379,7 +432,6 @@ else:
         else:
             cph = CoxPHFitter()
             try:
-                # ⬇️ NESSUN argomento 'ties' qui
                 cph.fit(X, duration_col=time_col, event_col=event_col, show_progress=False)
                 st.markdown("**Tabella dei coefficienti (scala HR)**")
                 summ = cph.summary.copy()
@@ -450,6 +502,30 @@ else:
                         st.caption("Confrontare i profili per quantificare l’effetto combinato delle covariate sulla sopravvivenza prevista.")
                     except Exception:
                         st.info("Impossibile calcolare le curve predette con il profilo scelto.")
+
+                # ───────── Sintesi automatica risultati Cox
+                with st.expander("📝 Interpretazione automatica — Cox PH", expanded=True):
+                    lines = []
+                    # covariate significative
+                    try:
+                        sig = view[view["p"] < alpha].sort_values("p")
+                        if not sig.empty:
+                            covs = " • ".join([f"{ix}: HR={row['HR']:.2f} (p={fmt_p(row['p'])})" for ix, row in sig.iterrows()])
+                            lines.append(f"**Covariate significative** (α={alpha:.2f}): {covs}.")
+                        else:
+                            lines.append(f"Nessuna covariata significativa al livello α={alpha:.2f}.")
+                    except Exception:
+                        pass
+                    # concordance index
+                    try:
+                        c_index = float(cph.concordance_index_)
+                        qualit = "ottima" if c_index >= 0.75 else ("discreta" if c_index >= 0.65 else "limitata")
+                        lines.append(f"**Concordance index** = {c_index:.3f} ⇒ capacità discriminante **{qualit}**.")
+                    except Exception:
+                        pass
+                    if not lines:
+                        lines.append("Nessuna sintesi disponibile (esiti modello non calcolabili).")
+                    st.markdown("\n\n".join([f"- {t}" for t in lines]))
 
             except Exception as e:
                 st.error(f"Errore nella stima del modello di Cox: {e}")
