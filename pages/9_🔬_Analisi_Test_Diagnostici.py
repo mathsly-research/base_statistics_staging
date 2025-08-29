@@ -1,661 +1,402 @@
 # -*- coding: utf-8 -*-
+# pages/9_🔬_Analisi_Test_Diagnostici.py
+from __future__ import annotations
+
+import math
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-from core.state import init_state
-
-# Opzionali
+# Plot (opzionali)
 try:
-    from sklearn.metrics import (
-        roc_curve, auc, confusion_matrix,
-        precision_recall_curve, average_precision_score,
-        brier_score_loss
-    )
-    from sklearn.linear_model import LogisticRegression
-    _HAS_SKLEARN = True
+    import plotly.express as px
+    import plotly.graph_objects as go
 except Exception:
-    _HAS_SKLEARN = False
+    px = None
+    go = None
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Data store centralizzato (+ fallback sicuro)
+# ──────────────────────────────────────────────────────────────────────────────
 try:
-    from scipy import stats as spstats
-    _HAS_SCIPY = True
+    from data_store import ensure_initialized, get_active, stamp_meta
 except Exception:
-    _HAS_SCIPY = False
+    def ensure_initialized():
+        st.session_state.setdefault("ds_active_df", None)
+        st.session_state.setdefault("ds_meta", {"version": 0, "updated_at": None, "source": None, "note": ""})
+    def get_active(required: bool = True):
+        ensure_initialized()
+        df_ = st.session_state.get("ds_active_df")
+        if required and (df_ is None or df_.empty):
+            st.error("Nessun dataset attivo. Importi i dati e completi la pulizia.")
+            st.stop()
+        return df_
+    def stamp_meta():
+        ensure_initialized()
+        meta = st.session_state["ds_meta"]
+        ver = meta.get("version", 0)
+        src = meta.get("source") or "-"
+        ts = meta.get("updated_at")
+        when = "-"
+        if ts:
+            from datetime import datetime
+            when = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+        c1, c2, c3 = st.columns(3)
+        with c1: st.metric("Versione dati", ver)
+        with c2: st.metric("Origine", src)
+        with c3: st.metric("Ultimo aggiornamento", when)
 
-import plotly.graph_objects as go
+# ──────────────────────────────────────────────────────────────────────────────
+# Config pagina + nav laterale
+# ──────────────────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="🔬 Analisi Test Diagnostici", layout="wide")
+try:
+    from nav import sidebar
+    sidebar()
+except Exception:
+    pass
 
-# ===========================================================
-# Utility comuni
-# ===========================================================
-def _use_active_df() -> pd.DataFrame:
-    if "df_working" in st.session_state and st.session_state.df_working is not None:
-        return st.session_state.df_working.copy()
-    return st.session_state.df.copy()
+KEY = "diag"
+def k(name: str) -> str:
+    return f"{KEY}_{name}"
 
-def _is_binary(s: pd.Series) -> bool:
-    vals = s.dropna().unique()
-    return len(vals) == 2
-
-def _confusion_from_binary(y_true: np.ndarray, y_pred: np.ndarray):
-    y_true = np.asarray(y_true).astype(int)
-    y_pred = np.asarray(y_pred).astype(int)
-    TP = int(((y_true == 1) & (y_pred == 1)).sum())
-    TN = int(((y_true == 0) & (y_pred == 0)).sum())
-    FP = int(((y_true == 0) & (y_pred == 1)).sum())
-    FN = int(((y_true == 1) & (y_pred == 0)).sum())
-    return TP, FP, TN, FN
-
-def _safe_div(a, b):
-    return float(a) / float(b) if b not in (0, 0.0) else np.nan
-
-def _binom_ci(x, n, alpha=0.05):
-    if n is None or n == 0:
-        return (np.nan, np.nan)
-    p = x / n
-    if _HAS_SCIPY:
-        lo = spstats.beta.ppf(alpha/2, x, n - x + 1) if x > 0 else 0.0
-        hi = spstats.beta.ppf(1 - alpha/2, x + 1, n - x) if x < n else 1.0
-        return (float(lo), float(hi))
-    z = 1.959963984540054
-    denom = 1 + z**2 / n
-    center = (p + z**2/(2*n)) / denom
-    halfw = (z * np.sqrt((p*(1-p) + z**2/(4*n))/n)) / denom
-    return (float(center - halfw), float(center + halfw))
-
-def _lr_ci(tp, fp, tn, fn, alpha=0.05):
-    z = 1.959963984540054
-    sens = _safe_div(tp, tp + fn)
-    spec = _safe_div(tn, tn + fp)
-    lr_plus = _safe_div(sens, 1 - spec) if np.isfinite(sens) and np.isfinite(spec) and spec != 1 else np.nan
-    lr_minus = _safe_div(1 - sens, spec) if np.isfinite(sens) and np.isfinite(spec) and spec != 0 else np.nan
-
-    def _sum(terms):
-        return np.sum(terms)
-
+# ──────────────────────────────────────────────────────────────────────────────
+# Helper: ROC/PR, metriche e tabelle
+# ──────────────────────────────────────────────────────────────────────────────
+def auc_mann_whitney(y_true: np.ndarray, score: np.ndarray) -> float:
+    """AUC = probabilità che uno score positivo superi uno negativo (U di Mann–Whitney)."""
     try:
-        se_log_lr_plus = np.sqrt(_sum([
-            _safe_div(1, tp) if tp>0 else np.nan,
-            -_safe_div(1, (tp + fn)) if (tp+fn)>0 else np.nan,
-            _safe_div(1, fp) if fp>0 else np.nan,
-            -_safe_div(1, (fp + tn)) if (fp+tn)>0 else np.nan
-        ]))
+        from scipy.stats import rankdata
+        y = np.asarray(y_true).astype(int)
+        s = np.asarray(score).astype(float)
+        n1 = int((y == 1).sum()); n0 = int((y == 0).sum())
+        if n1 == 0 or n0 == 0: return float("nan")
+        r = rankdata(s)
+        u = float(r[y == 1].sum()) - n1 * (n1 + 1) / 2.0
+        return float(u / (n1 * n0))
     except Exception:
-        se_log_lr_plus = np.nan
+        return float("nan")
 
-    try:
-        se_log_lr_minus = np.sqrt(_sum([
-            _safe_div(1, fn) if fn>0 else np.nan,
-            -_safe_div(1, (tp + fn)) if (tp+fn)>0 else np.nan,
-            _safe_div(1, tn) if tn>0 else np.nan,
-            -_safe_div(1, (fp + tn)) if (fp+tn)>0 else np.nan
-        ]))
-    except Exception:
-        se_log_lr_minus = np.nan
-
-    def _ci_from_log(lr, se):
-        if not (np.isfinite(lr) and np.isfinite(se)):
-            return (np.nan, np.nan, lr)
-        lo = np.exp(np.log(lr) - z * se)
-        hi = np.exp(np.log(lr) + z * se)
-        return (float(lo), float(hi), float(lr))
-
-    lo_p, hi_p, lr_p = _ci_from_log(lr_plus, se_log_lr_plus)
-    lo_m, hi_m, lr_m = _ci_from_log(lr_minus, se_log_lr_minus)
-    return (lr_p, lo_p, hi_p, lr_m, lo_m, hi_m)
-
-def _metric_table(TP, FP, TN, FN, alpha=0.05):
-    sens = _safe_div(TP, TP + FN)
-    spec = _safe_div(TN, TN + FP)
-    ppv  = _safe_div(TP, TP + FP)
-    npv  = _safe_div(TN, TN + FN)
-    acc  = _safe_div(TP + TN, TP + FP + TN + FN)
-    youden = sens + spec - 1
-
-    sens_lo, sens_hi = _binom_ci(TP, TP + FN, alpha)
-    spec_lo, spec_hi = _binom_ci(TN, TN + FP, alpha)
-    ppv_lo,  ppv_hi  = _binom_ci(TP, TP + FP, alpha) if (TP + FP) > 0 else (np.nan, np.nan)
-    npv_lo,  npv_hi  = _binom_ci(TN, TN + FN, alpha) if (TN + FN) > 0 else (np.nan, np.nan)
-    acc_lo,  acc_hi  = _binom_ci(TP + TN, TP + FP + TN + FN, alpha)
-
-    lr_p, lr_p_lo, lr_p_hi, lr_m, lr_m_lo, lr_m_hi = _lr_ci(TP, FP, TN, FN, alpha)
-
-    df = pd.DataFrame([
-        {"Metrica": "Sensibilità", "Valore": sens, "CI 2.5%": sens_lo, "CI 97.5%": sens_hi},
-        {"Metrica": "Specificità", "Valore": spec, "CI 2.5%": spec_lo, "CI 97.5%": spec_hi},
-        {"Metrica": "PPV",         "Valore": ppv,  "CI 2.5%": ppv_lo,  "CI 97.5%": ppv_hi},
-        {"Metrica": "NPV",         "Valore": npv,  "CI 2.5%": npv_lo,  "CI 97.5%": npv_hi},
-        {"Metrica": "Accuratezza", "Valore": acc,  "CI 2.5%": acc_lo,  "CI 97.5%": acc_hi},
-        {"Metrica": "LR+",         "Valore": lr_p, "CI 2.5%": lr_p_lo, "CI 97.5%": lr_p_hi},
-        {"Metrica": "LR−",         "Valore": lr_m, "CI 2.5%": lr_m_lo, "CI 97.5%": lr_m_hi},
-        {"Metrica": "Youden J",    "Valore": youden, "CI 2.5%": np.nan, "CI 97.5%": np.nan},
-    ])
-    return df.round(4)
-
-def _roc_plot(y_true, y_score):
-    fpr, tpr, _ = roc_curve(y_true, y_score)
-    auc_val = auc(fpr, tpr)
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=fpr, y=tpr, mode="lines", name=f"ROC (AUC={auc_val:.3f})"))
-    fig.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="lines", name="No skill", line=dict(dash="dash")))
-    fig.update_layout(title="ROC curve", xaxis_title="FPR (1 - Specificità)", yaxis_title="TPR (Sensibilità)")
-    return fig, auc_val
-
-def _pr_plot(y_true, y_score):
-    precision, recall, _ = precision_recall_curve(y_true, y_score)
-    ap = average_precision_score(y_true, y_score)
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=recall, y=precision, mode="lines", name=f"PR (AP={ap:.3f})"))
-    fig.update_layout(title="Precision–Recall curve", xaxis_title="Recall (Sensibilità)", yaxis_title="Precision (PPV)")
-    return fig, ap
-
-def _optimal_threshold(y_true, y_score):
-    fpr, tpr, thr = roc_curve(y_true, y_score)
-    j = tpr - fpr
-    k = int(np.argmax(j))
-    return float(thr[k]), float(tpr[k]), float(1 - fpr[k])
-
-def _bayes_post_test(pre_prob, lr):
-    if pre_prob is None or not np.isfinite(pre_prob):
-        return np.nan
-    pre_prob = float(np.clip(pre_prob, 1e-12, 1-1e-12))
-    pre_odds = pre_prob / (1 - pre_prob)
-    post_odds = pre_odds * float(lr) if np.isfinite(lr) else np.nan
-    return float(post_odds / (1 + post_odds)) if np.isfinite(post_odds) else np.nan
-
-def _dca_compute(y_true, scores, thresholds):
-    y_true = np.asarray(y_true).astype(int)
-    N = len(y_true)
-    prev = y_true.mean() if N>0 else np.nan
-    rows = []
-    for pt in thresholds:
-        if not (0 < pt < 1):
-            continue
-        thr = np.quantile(scores, 1-pt) if np.isfinite(np.nanmean(scores)) else None
-        y_pred = (scores >= thr).astype(int) if thr is not None else np.zeros_like(y_true)
-        TP, FP, TN, FN = _confusion_from_binary(y_true, y_pred)
-        TPn = TP / N if N>0 else np.nan
-        FPn = FP / N if N>0 else np.nan
-        w = pt / (1 - pt)
-        nb_test = TPn - FPn * w
-        nb_all  = prev - (1 - prev) * w if np.isfinite(prev) else np.nan
-        nb_none = 0.0
-        rows.append({"threshold": float(pt), "NB_test": float(nb_test), "NB_all": float(nb_all), "NB_none": float(nb_none)})
-    return pd.DataFrame(rows)
-
-# ---------- Calibrazione ----------
-def _clip_probs(p, eps=1e-9):
-    return np.clip(np.asarray(p, dtype=float), eps, 1 - eps)
-
-def _compute_calibration(y_true, prob, n_bins=10):
-    """
-    Calcola: reliability table (bin decilici), Brier, calibration-in-the-large (intercetta) e slope.
-    Stima intercetta e slope con logistic regression di y ~ 1 + logit(prob).
-    """
+def roc_curve_strict(y_true: np.ndarray, score: np.ndarray, greater_is_positive: bool = True):
+    """ROC corretta: soglie ai valori distinti dello score (desc), gestione dei tie, include (0,0) e (1,1)."""
     y = np.asarray(y_true).astype(int)
-    p = _clip_probs(prob)
+    s = np.asarray(score).astype(float)
+    if not greater_is_positive:
+        s = -s
+    P = int((y == 1).sum()); N = int((y == 0).sum())
+    if P == 0 or N == 0:
+        return np.array([0.0, 1.0]), np.array([0.0, 1.0]), np.array([np.nan])
+    order = np.argsort(-s, kind="mergesort")
+    ys, ss = y[order], s[order]
+    fpr = [0.0]; tpr = [0.0]; thr_list = [np.inf]
+    tp = 0; fp = 0; i = 0; n = len(ys)
+    while i < n:
+        thr = ss[i]
+        tp_inc = 0; fp_inc = 0
+        while i < n and ss[i] == thr:
+            if ys[i] == 1: tp_inc += 1
+            else: fp_inc += 1
+            i += 1
+        tp += tp_inc; fp += fp_inc
+        tpr.append(tp / P); fpr.append(fp / N); thr_list.append(thr)
+    if tpr[-1] != 1.0 or fpr[-1] != 1.0:
+        tpr.append(1.0); fpr.append(1.0); thr_list.append(-np.inf)
+    return np.array(fpr), np.array(tpr), np.array(thr_list)
 
-    # Brier score
-    try:
-        brier = float(brier_score_loss(y, p))
-    except Exception:
-        brier = float(np.mean((y - p)**2))
+def pr_curve(y_true: np.ndarray, score: np.ndarray, greater_is_positive: bool = True):
+    """Precision-Recall con soglie ai valori distinti."""
+    y = np.asarray(y_true).astype(int)
+    s = np.asarray(score).astype(float)
+    if not greater_is_positive: s = -s
+    order = np.argsort(-s, kind="mergesort")
+    ys = y[order]
+    tp = 0; fp = 0
+    P = int((y == 1).sum())
+    recalls = [0.0]; precisions = [1.0]
+    i = 0; n = len(ys)
+    while i < n:
+        thr = s[order][i]
+        tp_inc = 0; fp_inc = 0
+        while i < n and s[order][i] == thr:
+            if ys[i] == 1: tp_inc += 1
+            else: fp_inc += 1
+            i += 1
+        tp += tp_inc; fp += fp_inc
+        rec = tp / max(P, 1)
+        prec = tp / max(tp + fp, 1)
+        recalls.append(rec); precisions.append(prec)
+    return np.array(recalls), np.array(precisions)
 
-    # Logit transform
-    logit_p = np.log(p / (1 - p))
+def metrics_at_threshold(y_true: np.ndarray, score: np.ndarray, thr: float, greater_is_positive: bool = True):
+    """Metriche a una soglia data."""
+    y = np.asarray(y_true).astype(int)
+    s = np.asarray(score).astype(float)
+    if greater_is_positive:
+        yhat = (s >= thr).astype(int)
+    else:
+        yhat = (s <= thr).astype(int)
 
-    # Regressione logistica per intercetta e slope
-    calib_intercept, calib_slope = np.nan, np.nan
-    if _HAS_SKLEARN and np.isfinite(logit_p).all():
-        try:
-            X = np.column_stack([np.ones_like(logit_p), logit_p])
-            # Fit con penality minima usando solver liblinear; disabilitiamo la regolarizzazione con grandi C
-            lr = LogisticRegression(fit_intercept=False, solver="liblinear", C=1e6, max_iter=1000)
-            lr.fit(X, y)
-            calib_intercept = float(lr.coef_[0][0])
-            calib_slope     = float(lr.coef_[0][1])
-        except Exception:
-            pass
+    TP = int(((y == 1) & (yhat == 1)).sum())
+    TN = int(((y == 0) & (yhat == 0)).sum())
+    FP = int(((y == 0) & (yhat == 1)).sum())
+    FN = int(((y == 1) & (yhat == 0)).sum())
 
-    # Reliability table per decili
-    try:
-        bins = pd.qcut(p, q=n_bins, duplicates="drop")
-        df_cal = pd.DataFrame({"y": y, "p": p, "bin": bins})
-        grp = df_cal.groupby("bin", observed=True).agg(
-            p_mean=("p", "mean"),
-            y_rate=("y", "mean"),
-            n=("y", "size")
-        ).reset_index(drop=True).sort_values("p_mean")
-    except Exception:
-        # Fallback: taglio uniforme
-        edges = np.linspace(0, 1, n_bins+1)
-        bin_idx = np.digitize(p, edges) - 1
-        bin_idx = np.clip(bin_idx, 0, n_bins-1)
-        df_cal = pd.DataFrame({"y": y, "p": p, "bin": bin_idx})
-        grp = df_cal.groupby("bin", observed=True).agg(
-            p_mean=("p", "mean"),
-            y_rate=("y", "mean"),
-            n=("y", "size")
-        ).reset_index(drop=True).sort_values("p_mean")
+    sens = TP / max(TP + FN, 1)
+    spec = TN / max(TN + FP, 1)
+    ppv  = TP / max(TP + FP, 1)
+    npv  = TN / max(TN + FN, 1)
+    acc  = (TP + TN) / max(len(y), 1)
+    bacc = (sens + spec) / 2.0
+    f1   = (2 * ppv * sens) / max(ppv + sens, 1e-12)
+    denom = math.sqrt(max((TP + FP) * (TP + FN) * (TN + FP) * (TN + FN), 1))
+    mcc  = ((TP * TN - FP * FN) / denom) if denom > 0 else float("nan")
+    lr_p = sens / max(1 - spec, 1e-12)
+    lr_m = (1 - sens) / max(spec, 1e-12)
 
-    return grp, brier, calib_intercept, calib_slope
+    return dict(threshold=thr, TP=TP, TN=TN, FP=FP, FN=FN, Sens=sens, Spec=spec,
+                PPV=ppv, NPV=npv, Acc=acc, BAcc=bacc, F1=f1, MCC=mcc,
+                LR_plus=lr_p, LR_minus=lr_m, Youden=sens + spec - 1)
 
-# ===========================================================
-# Pagina
-# ===========================================================
-init_state()
-st.title("🔬 Analisi Test Diagnostici")
+def build_threshold_table(y_true: np.ndarray, score: np.ndarray, greater_is_positive: bool):
+    """Tabella metriche per tutte le soglie distinte (ordinate per soglia)."""
+    s = np.asarray(score).astype(float)
+    thr_unique = np.unique(np.sort(s))
+    rows = []
+    for thr in thr_unique:
+        rows.append(metrics_at_threshold(y_true, score, thr, greater_is_positive))
+    dfm = pd.DataFrame(rows).sort_values("threshold")
+    # suggerimenti soglia
+    best_youden = dfm.loc[dfm["Youden"].idxmax(), "threshold"] if not dfm["Youden"].isna().all() else np.nan
+    best_f1 = dfm.loc[dfm["F1"].idxmax(), "threshold"] if not dfm["F1"].isna().all() else np.nan
+    return dfm, float(best_youden), float(best_f1)
 
-# Check dataset
-if "df" not in st.session_state or st.session_state.df is None:
-    st.warning("Nessun dataset disponibile. Carichi i dati in **Step 0 — Upload Dataset**.")
-    st.page_link("pages/0_📂_Upload_Dataset.py", label="➡️ Vai a Upload Dataset", icon="📂")
-    st.stop()
-
-df = _use_active_df()
-if df is None or df.empty:
-    st.error("Il dataset attivo è vuoto.")
-    st.stop()
-
-st.subheader("Selezione variabili")
-with st.container():
-    outcome = st.selectbox("Outcome (gold standard, binario: 0/1 o due categorie):", options=list(df.columns))
-    test_var = st.selectbox("Variabile di test (predittore diagnostico):", options=[c for c in df.columns if c != outcome])
-
-# Outcome binario
-y_raw = df[outcome]
-non_na_mask = ~y_raw.isna()
-if not _is_binary(y_raw):
-    st.error("L’outcome selezionato deve avere **esattamente due** livelli (dopo gestione dei missing).")
-    st.stop()
-
-levels = sorted(y_raw.dropna().unique().tolist(), key=lambda x: str(x))
-pos_class = st.selectbox("Classe positiva dell’outcome (codificata come 1):", options=levels)
-y = (y_raw == pos_class).astype(int)
-
-# Test var
-x = df[test_var]
-valid_mask = non_na_mask & (~x.isna())
-y_valid = y[valid_mask]
-x_valid = x[valid_mask]
-
-st.markdown("### Impostazioni del test")
-is_binary_test = _is_binary(x_valid)
-
-if is_binary_test:
-    t_levels = sorted(x_valid.dropna().unique().tolist(), key=lambda z: str(z))
-    test_pos = st.selectbox("Livello del TEST considerato positivo:", options=t_levels)
-    with st.spinner("Calcolo la classificazione del test…"):
-        y_pred = (x_valid == test_pos).astype(int).values
-else:
-    st.info("La variabile di test è continua (o con più di 2 livelli). Selezioni una soglia e la direzione.")
-    direction = st.radio("Direzione di positività del test:", ["≥ soglia = positivo", "≤ soglia = positivo"], horizontal=True)
-    x_min, x_max = float(np.nanmin(x_valid)), float(np.nanmax(x_valid))
-    default_thr = float(np.nanmedian(x_valid))
-    thr = st.slider("Soglia", min_value=x_min, max_value=x_max, value=default_thr, step=(x_max-x_min)/100 if x_max>x_min else 1.0)
-
-    if _HAS_SKLEARN:
-        if st.checkbox("Trova soglia ottimale (massimo Youden J)"):
-            with st.spinner("Ottimizzo la soglia sul massimo Youden J…"):
-                score = x_valid.astype(float).values
-                best_thr, best_sens, best_spec = _optimal_threshold(y_valid.values, score)
-                thr = best_thr
-                st.success(f"Soglia ottimale = {thr:.6g} (Sens={best_sens:.3f}, Spec={best_spec:.3f})")
-
-    with st.spinner("Applico la soglia per classificare il test…"):
-        if direction == "≥ soglia = positivo":
-            y_pred = (x_valid.astype(float).values >= thr).astype(int)
-        else:
-            y_pred = (x_valid.astype(float).values <= thr).astype(int)
-
-# Confusion matrix e metriche
-with st.spinner("Calcolo matrice di confusione e metriche…"):
-    TP, FP, TN, FN = _confusion_from_binary(y_valid.values, y_pred)
-    total = TP + FP + TN + FN
-    prev  = (TP + FN) / total if total > 0 else np.nan
-
-    cm_df = pd.DataFrame(
-        [[TP, FP],
-         [FN, TN]],
-        index=["Vero 1 (Positivo)", "Vero 0 (Negativo)"],
-        columns=["Pred 1 (Test +)", "Pred 0 (Test -)"]
+def confusion_table_counts_percent(TN, FP, FN, TP) -> pd.DataFrame:
+    """Matrice di confusione con percentuali per riga."""
+    row0 = TN + FP; row1 = FN + TP
+    def cell(c, r):
+        p = (c / r * 100.0) if r > 0 else np.nan
+        return f"{int(c)} ({p:.1f}%)" if p == p else f"{int(c)}"
+    return pd.DataFrame(
+        {"Pred 0": [cell(TN, row0), cell(FN, row1)],
+         "Pred 1": [cell(FP, row0), cell(TP, row1)]},
+        index=["Vera 0", "Vera 1"]
     )
 
-st.markdown("### Matrice di confusione")
-st.dataframe(cm_df, use_container_width=True)
-st.caption(
-    "Come leggere: **TP** (veri positivi) e **FN** (falsi negativi) appartengono ai casi realmente positivi; "
-    "**TN** (veri negativi) e **FP** (falsi positivi) ai realmente negativi. La riga indica lo **stato reale**, la colonna l’**esito del test**."
+# ──────────────────────────────────────────────────────────────────────────────
+# Header
+# ──────────────────────────────────────────────────────────────────────────────
+st.title("🔬 Analisi Test Diagnostici")
+st.caption("ROC/PR, metriche e scelta soglia per un outcome binario a partire da uno score/valore continuo.")
+
+ensure_initialized()
+df = get_active(required=True)
+with st.expander("Stato dati", expanded=False):
+    stamp_meta()
+if df is None or df.empty:
+    st.stop()
+
+num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+all_cols = list(df.columns)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# STEP 1 — Selezione variabili
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown("### 1) Seleziona outcome e score")
+
+c1, c2, c3 = st.columns([2, 2, 1.2])
+with c1:
+    y_col = st.selectbox("Outcome (binario o categoriale)", options=all_cols, key=k("y"))
+with c2:
+    score_col = st.selectbox("Score / probabilità (numerico)", options=num_cols, index=0 if num_cols else None, key=k("score"))
+with c3:
+    direction = st.selectbox("Direzione", ["Più alto = più positivo", "Più basso = più positivo"], key=k("dir"))
+
+y_raw = df[y_col]
+# binarizzazione outcome
+if pd.api.types.is_numeric_dtype(y_raw) and set(pd.unique(y_raw.dropna())) <= {0, 1}:
+    pos_label = 1
+    y = y_raw.astype(int)
+    st.caption("Outcome interpretato come binario {0,1} con '1' = positivo.")
+else:
+    levels = sorted(y_raw.dropna().astype(str).unique().tolist())
+    pos_label = st.selectbox("Scegli la categoria 'positiva' (outcome = 1)", options=levels, key=k("poslab"))
+    y = (y_raw.astype(str) == pos_label).astype(int)
+
+s = pd.to_numeric(df[score_col], errors="coerce")
+greater_is_positive = (direction == "Più alto = più positivo")
+
+# controllo classi
+if y.nunique(dropna=True) < 2:
+    st.error("L'outcome deve contenere entrambe le classi (0 e 1).")
+    st.stop()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# STEP 2 — Scelta soglia e metriche
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown("### 2) Soglia e metriche")
+
+# Tabella completa (per suggerire soglie)
+df_thr, thr_youden, thr_f1 = build_threshold_table(y.values, s.values, greater_is_positive)
+
+colA, colB = st.columns([1.6, 1.4])
+with colA:
+    thr_mode = st.radio("Come scegliere la soglia?",
+                        ["Manuale", "Ottimizza Youden (Sens+Spec−1)", "Ottimizza F1"],
+                        index=1, key=k("thr_mode"))
+with colB:
+    if np.nanmin(s) == np.nanmax(s):
+        st.warning("Lo score è costante: non è possibile costruire una curva ROC/PR.")
+    min_s, max_s = float(np.nanmin(s)), float(np.nanmax(s))
+    step = max((max_s - min_s) / 100.0, 1e-6)
+    thr_manual = st.slider("Soglia manuale",
+                           min_value=min_s, max_value=max_s,
+                           value=float(np.percentile(s.dropna(), 50)) if s.notna().any() else 0.5,
+                           step=step, key=k("thr_manual"))
+
+if thr_mode.startswith("Ottimizza Youden"):
+    thr = thr_youden
+elif thr_mode.startswith("Ottimizza F1"):
+    thr = thr_f1
+else:
+    thr = thr_manual
+
+# metriche a soglia selezionata
+M = metrics_at_threshold(y.values, s.values, thr, greater_is_positive)
+AUC = auc_mann_whitney(y.values, s.values)
+
+# pannello metriche (con brevi spiegazioni)
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric("Accuracy", f"{M['Acc']:.3f}")
+m1.caption("Quota di classificazioni corrette (dipende dal bilanciamento delle classi).")
+m2.metric("Sensibilità (TPR)", f"{M['Sens']:.3f}")
+m2.caption("Pr(positivo predetto | positivo vero): capacità di cogliere i veri positivi.")
+m3.metric("Specificità (TNR)", f"{M['Spec']:.3f}")
+m3.caption("Pr(negativo predetto | negativo vero): evita falsi positivi.")
+m4.metric("PPV (Precision)", f"{M['PPV']:.3f}")
+m4.caption("Pr(positivo vero | positivo predetto): utilità in contesti clinici di conferma.")
+m5.metric("NPV", f"{M['NPV']:.3f}")
+m5.caption("Pr(negativo vero | negativo predetto): utilità per escludere la malattia.")
+
+m6, m7, m8, m9, m10 = st.columns(5)
+m6.metric("Balanced Acc.", f"{M['BAcc']:.3f}")
+m6.caption("Media di Sens e Spec: robusta a classi sbilanciate.")
+m7.metric("F1", f"{M['F1']:.3f}")
+m7.caption("Media armonica tra Precision (PPV) e Recall (Sensibilità).")
+m8.metric("MCC", f"{M['MCC']:.3f}")
+m8.caption("Correlazione tra vero e predetto (−1…1): robusto allo sbilanciamento.")
+m9.metric("LR+", f"{M['LR_plus']:.2f}")
+m9.caption("Quanto aumenta l’odds di malattia se il test è positivo (idealmente ≫1).")
+m10.metric("LR−", f"{M['LR_minus']:.2f}")
+m10.caption("Quanto resta l’odds con test negativo (idealmente ≪1).")
+
+st.markdown(
+    f"**Soglia corrente:** `{thr:.6g}`  "
+    f"• **Indice di Youden:** `{M['Youden']:.3f}`  "
+    f"• **AUC (ROC):** `{AUC:.3f}`"
 )
+st.caption("AUC misura la discriminazione complessiva (0.5=casuale, >0.8=ottima, 1=perfetta).")
 
-st.markdown("**Prevalenza osservata**: {:.3f}".format(prev) if np.isfinite(prev) else "**Prevalenza osservata**: n.d.")
+# Matrice di confusione
+st.markdown("#### Matrice di confusione")
+cm = confusion_table_counts_percent(M["TN"], M["FP"], M["FN"], M["TP"])
+st.dataframe(cm, use_container_width=True)
 
-with st.spinner("Stimo sensibilità, specificità, PPV, NPV, LR (con IC) e altre metriche…"):
-    metrics_df = _metric_table(TP, FP, TN, FN, alpha=0.05)
-st.dataframe(metrics_df, use_container_width=True)
-st.caption(
-    "Interpretazione rapida: **Sensibilità** = quota di malati che risultano positivi; **Specificità** = quota di sani che risultano negativi. "
-    "**PPV/NPV** dipendono dalla **prevalenza**. **LR+** e **LR−** (con IC) indicano quanto un test positivo/negativo cambia l’evidenza."
-)
+# ──────────────────────────────────────────────────────────────────────────────
+# STEP 3 — Grafici (ROC classica + PR + distribuzione p̂)
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown("### 3) Grafici")
 
-# =========================
-#   Grafici affiancati
-# =========================
 left, right = st.columns(2)
 
-auc_val = None
-ap_val = None
-score_for_plots = None
-
-if _HAS_SKLEARN:
-    # score continuo coerente (maggiore => più 'positivo')
-    if is_binary_test:
-        score_for_plots = (x_valid == test_pos).astype(int).values
-    else:
-        score_for_plots = x_valid.astype(float).values
-        if 'direction' in locals() and direction == "≤ soglia = positivo":
-            score_for_plots = -score_for_plots
-
-    with left:
-        with st.spinner("Calcolo e traccio ROC/AUC…"):
-            fig_roc, auc_val = _roc_plot(y_valid.values, score_for_plots)
-            st.plotly_chart(fig_roc, use_container_width=True)
-        st.caption(
-            "Curva **ROC**: compromesso tra **Sensibilità (TPR)** e **1−Specificità (FPR)** variando la soglia. "
-            "Un’**AUC** più alta indica migliore capacità discriminativa (0.5 = casuale; >0.8 buona)."
+# ROC (curva verde, area grigia, diagonale, marker soglia)
+with left:
+    if px is not None and go is not None and s.notna().any():
+        fpr, tpr, thr_list = roc_curve_strict(y.values, s.values, greater_is_positive)
+        figroc = go.Figure()
+        figroc.add_trace(go.Scatter(
+            x=fpr, y=tpr, mode="lines", line_shape="hv",
+            line=dict(color="#2ecc71", width=3),
+            fill="tozeroy", fillcolor="rgba(128,128,128,0.35)",
+            name=f"ROC (AUC={AUC:.3f})"
+        ))
+        figroc.add_shape(type="line", x0=0, y0=0, x1=1, y1=1,
+                         line=dict(color="rgba(0,0,0,0.5)", dash="dash"))
+        # punto alla soglia corrente
+        fpr_thr = 1 - M["Spec"]
+        tpr_thr = M["Sens"]
+        figroc.add_trace(go.Scatter(
+            x=[fpr_thr], y=[tpr_thr], mode="markers",
+            marker=dict(symbol="x", size=10, color="#2ecc71"),
+            name=f"Soglia {thr:.2f}"
+        ))
+        figroc.update_layout(
+            template="simple_white", title="Curva ROC",
+            xaxis_title="FPR (1 − Specificità)", yaxis_title="TPR (Sensibilità)",
+            legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="left", x=0),
         )
+        figroc.update_xaxes(range=[0, 1], showline=True, linewidth=2, linecolor="black")
+        figroc.update_yaxes(range=[0, 1], showline=True, linewidth=2, linecolor="black",
+                            scaleanchor="x", scaleratio=1)
+        st.plotly_chart(figroc, use_container_width=True)
 
-    with right:
-        with st.spinner("Calcolo e traccio Precision–Recall (AP)…"):
-            fig_pr, ap_val = _pr_plot(y_valid.values, score_for_plots)
-            st.plotly_chart(fig_pr, use_container_width=True)
-        st.caption(
-            "Curva **Precision–Recall**: **Precision (PPV)** vs **Recall (Sensibilità)**. "
-            "Più informativa della ROC quando la classe positiva è rara. **AP** riassume l’area sotto questa curva."
-        )
-else:
-    st.info("Per le curve ROC e Precision–Recall è necessario `scikit-learn`.")
+# PR curve + distribuzione dello score per classe in tab affiancato
+with right:
+    if px is not None and go is not None and s.notna().any():
+        t1, t2 = st.tabs(["📈 Precision–Recall", "📊 Distribuzione score"])
+        with t1:
+            rec, prec = pr_curve(y.values, s.values, greater_is_positive)
+            figpr = go.Figure()
+            figpr.add_trace(go.Scatter(x=rec, y=prec, mode="lines", line_shape="hv", name="PR"))
+            # baseline = prevalenza
+            prev = float((y == 1).mean())
+            figpr.add_hline(y=prev, line_dash="dash")
+            figpr.update_layout(template="simple_white", title="Curva Precision–Recall",
+                                xaxis_title="Recall (Sensibilità)", yaxis_title="Precision (PPV)")
+            figpr.update_xaxes(range=[0, 1]); figpr.update_yaxes(range=[0, 1])
+            st.plotly_chart(figpr, use_container_width=True)
+        with t2:
+            df_plot = pd.DataFrame({"score": s, "y": y})
+            df_plot["Classe"] = df_plot["y"].map({0: "Classe 0", 1: "Classe 1"})
+            figd = px.histogram(df_plot.dropna(), x="score", color="Classe",
+                                barmode="overlay", nbins=30, template="simple_white",
+                                title="Distribuzione dello score per classe")
+            figd.add_vline(x=thr, line_dash="dash")
+            figd.update_layout(xaxis_title=score_col, yaxis_title="Frequenza")
+            st.plotly_chart(figd, use_container_width=True)
 
-# ================================
-#   Probabilità post-test (Bayes)
-# ================================
-st.markdown("## Probabilità post-test (Bayes)")
-with st.expander("Imposta la probabilità pre-test", expanded=False):
-    pre_default = float(prev) if np.isfinite(prev) else 0.2
-    pre_test = st.slider("Probabilità pre-test (stima clinica o prevalenza attesa)", 0.0, 1.0, pre_default, step=0.01)
-
-try:
-    lr_plus  = float(metrics_df.loc[metrics_df["Metrica"]=="LR+","Valore"].values[0])
-    lr_minus = float(metrics_df.loc[metrics_df["Metrica"]=="LR−","Valore"].values[0])
-except Exception:
-    lr_plus, lr_minus = np.nan, np.nan
-
-with st.spinner("Calcolo probabilità post-test…"):
-    post_pos = _bayes_post_test(pre_test, lr_plus)
-    post_neg = _bayes_post_test(pre_test, lr_minus)
-
-post_tbl = pd.DataFrame([
-    {"Scenario": "Test positivo", "LR": lr_plus,  "Probabilità post-test": post_pos},
-    {"Scenario": "Test negativo", "LR": lr_minus, "Probabilità post-test": post_neg},
-]).round(4)
-st.dataframe(post_tbl, use_container_width=True)
-
-st.latex(r"\text{odds}_{post} = \text{odds}_{pre} \times LR")
-st.latex(r"p_{post} = \frac{\text{odds}_{post}}{1+\text{odds}_{post}}")
-st.caption(
-    "Guida: imposti una **probabilità pre-test**. Con un **test positivo**, usa **LR+**; con un **test negativo**, usa **LR−**. "
-    "Esempio: pre-test 0.30 ⇒ odds=0.43; con LR+=5 ⇒ odds_post=2.15 ⇒ p_post≈0.68."
-)
-
-# =========================
-#   Decision Curve Analysis
-# =========================
-st.markdown("## Decision Curve Analysis (DCA)")
-if _HAS_SKLEARN and score_for_plots is not None and len(score_for_plots) == len(y_valid):
-    with st.spinner("Calcolo Net Benefit su un range di soglie…"):
-        thresholds = np.linspace(0.01, 0.99, 99)
-        dca_df = _dca_compute(y_valid.values, score_for_plots, thresholds)
-
-    with st.spinner("Genero il grafico DCA…"):
-        fig_dca = go.Figure()
-        fig_dca.add_trace(go.Scatter(x=dca_df["threshold"], y=dca_df["NB_test"], mode="lines", name="Test"))
-        fig_dca.add_trace(go.Scatter(x=dca_df["threshold"], y=dca_df["NB_all"],  mode="lines", name="Tratta tutti"))
-        fig_dca.add_trace(go.Scatter(x=dca_df["threshold"], y=dca_df["NB_none"], mode="lines", name="Tratta nessuno"))
-        fig_dca.update_layout(title="Decision Curve Analysis — Net Benefit",
-                              xaxis_title="Soglia di decisione (p_t)",
-                              yaxis_title="Net Benefit")
-        st.plotly_chart(fig_dca, use_container_width=True)
-
-    st.caption(
-        "L’asse **x** è la **soglia di decisione** \(p_t\). Il **Net Benefit** confronta il test con **Tratta tutti** e **Tratta nessuno**. "
-        "Dove la curva del **Test** sta **sopra** le altre, l’uso del test comporta **beneficio clinico**."
+with st.expander("ℹ️ Come leggere i grafici", expanded=False):
+    st.markdown(
+        "- **ROC**: curva verde con **area grigia** (AUC). La **diagonale** è il caso casuale. "
+        "Il marcatore indica la coppia (**FPR**, **TPR**) alla **soglia scelta**.  \n"
+        "- **PR**: utile con classi sbilanciate; la linea orizzontale tratteggiata è la **prevalenza** (baseline).  \n"
+        "- **Distribuzione score**: una buona separazione tra le due classi indica **buona discriminazione**; "
+        "la linea tratteggiata è la **soglia corrente**."
     )
-else:
-    st.info("Per la DCA è necessario uno **score continuo** (o probabilità) e `scikit-learn`.")
 
-# =========================
-#           Calibrazione
-# =========================
-st.markdown("## Calibrazione")
-if _HAS_SKLEARN and score_for_plots is not None:
-    # Opzione: usare una colonna di probabilità già presente nel dataset
-    numeric_cols = [c for c in df.columns if c not in [outcome] and pd.api.types.is_numeric_dtype(df[c])]
-    prob_col = st.selectbox("Colonna con probabilità pre-calcolate (opzionale):", options=["— Nessuna —"] + numeric_cols)
-    use_prob = None
+# ──────────────────────────────────────────────────────────────────────────────
+# STEP 4 — Tabella completa delle soglie
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown("### 4) Tabella completa per tutte le soglie")
+df_show = df_thr.copy()
+cols_order = ["threshold", "Acc", "Sens", "Spec", "PPV", "NPV", "BAcc", "F1", "MCC", "LR_plus", "LR_minus", "Youden", "TP", "FP", "FN", "TN"]
+df_show = df_show[[c for c in cols_order if c in df_show.columns]]
+st.dataframe(df_show.round(4), use_container_width=True, height=300)
 
-    if prob_col != "— Nessuna —":
-        # Usa probabilità fornite (filtrate su valid_mask)
-        rawp = df.loc[valid_mask, prob_col].astype(float).values
-        use_prob = _clip_probs(rawp)
-        st.info("Uso le **probabilità fornite** dalla colonna selezionata.")
-    else:
-        # Platt scaling sullo score (stima su stesso set — attenzioni di overfitting)
-        with st.spinner("Stimo probabilità dallo score (Platt scaling)…"):
-            try:
-                Xs = score_for_plots.reshape(-1, 1).astype(float)
-                lr_platt = LogisticRegression(solver="liblinear", max_iter=1000)
-                lr_platt.fit(Xs, y_valid.values)
-                use_prob = lr_platt.predict_proba(Xs)[:, 1]
-                st.caption("Nota: le probabilità sono stimate sullo **stesso dataset** (possibile **overfitting**).")
-            except Exception:
-                use_prob = None
-                st.warning("Impossibile stimare probabilità dallo score.")
+csv = df_show.to_csv(index=False).encode("utf-8")
+st.download_button("Scarica tabella (CSV)", data=csv, file_name="diagnostics_thresholds.csv", mime="text/csv", key=k("dl"))
 
-    if use_prob is not None:
-        with st.spinner("Calcolo reliability diagram, Brier score e parametri di calibrazione…"):
-            cal_tbl, brier, c_int, c_slope = _compute_calibration(y_valid.values, use_prob, n_bins=10)
-
-        # Grafici affiancati: curva calibrazione + istogramma probabilità
-        g1, g2 = st.columns(2)
-        with g1:
-            fig_cal = go.Figure()
-            fig_cal.add_trace(go.Scatter(x=cal_tbl["p_mean"], y=cal_tbl["y_rate"],
-                                         mode="lines+markers", name="Osservato vs Predetto"))
-            fig_cal.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="lines", name="Perfetta calibrazione", line=dict(dash="dash")))
-            fig_cal.update_layout(title="Reliability diagram (per decili)",
-                                  xaxis_title="Probabilità predetta media (per bin)",
-                                  yaxis_title="Tasso osservato di esito (per bin)")
-            st.plotly_chart(fig_cal, use_container_width=True)
-            st.caption(
-                "Se i punti seguono la linea diagonale, le **probabilità predette** corrispondono bene ai **tassi osservati**. "
-                "Curve **sopra** la diagonale indicano **sottostima**; **sotto** indicano **sovrastima** del rischio."
-            )
-        with g2:
-            try:
-                fig_hist = go.Figure()
-                fig_hist.add_trace(go.Histogram(x=use_prob, nbinsx=20))
-                fig_hist.update_layout(title="Distribuzione delle probabilità predette", xaxis_title="Probabilità", yaxis_title="Frequenza")
-                st.plotly_chart(fig_hist, use_container_width=True)
-            except Exception:
-                pass
-            st.caption("Distribuzione delle **probabilità predette**: utile per capire se il modello usa l’intero range (0–1) o concentra le previsioni.")
-
-        # Indicatori numerici
-        st.markdown("### Indicatori di calibrazione")
-        st.write(pd.DataFrame({
-            "Brier score": [round(brier, 4)],
-            "Calibration intercept": [round(c_int, 4) if np.isfinite(c_int) else np.nan],
-            "Calibration slope": [round(c_slope, 4) if np.isfinite(c_slope) else np.nan]
-        }))
-        st.caption(
-            "**Brier** (0 migliore): errore quadratico medio tra probabilità e outcome binario. "
-            "**Intercept ≈ 0** indica calibrazione globale corretta; **Slope ≈ 1** indica corretta dispersione. "
-            "Slope < 1 suggerisce **overfitting** (probabilità troppo estreme), > 1 **underfitting**."
-        )
-    else:
-        st.info("Nessuna probabilità disponibile o stimabile: la calibrazione richiede **probabilità**, non solo uno score binario.")
-else:
-    st.info("Per la calibrazione servono `scikit-learn` e uno **score/probabilità**.")
-
-# =========================
-#   Analisi per sottogruppi
-# =========================
-st.markdown("## Analisi per sottogruppi (opzionale)")
-with st.expander("Imposta stratificazione per sottogruppi", expanded=False):
-    stratify = st.selectbox("Variabile di stratificazione (opzionale):", options=["— Nessuna —"] + [c for c in df.columns if c not in [outcome, test_var]])
-    subgroup_table = None
-
-    if stratify and stratify != "— Nessuna —":
-        s = df.loc[valid_mask, stratify]
-        is_numeric = pd.api.types.is_numeric_dtype(s)
-        if is_numeric and s.dropna().nunique() > 10:
-            method = st.radio("Binning per variabile numerica:", ["Quantili", "Nessuno (usa come continua)"], horizontal=True)
-            if method == "Quantili":
-                qn = st.slider("Numero di quantili (bin)", 2, 10, 4, step=1)
-                with st.spinner("Creo sottogruppi (quantili)…"):
-                    try:
-                        s_binned = pd.qcut(s, q=qn, duplicates="drop")
-                        s_used = s_binned.astype(str)
-                    except Exception:
-                        s_used = pd.cut(s, bins=qn).astype(str)
-            else:
-                with st.spinner("Variabile continua: applico quantili di default (4) per creare gruppi…"):
-                    s_used = pd.qcut(s, q=4, duplicates="drop").astype(str)
-        else:
-            with st.spinner("Preparo livelli di stratificazione…"):
-                s_used = s.astype(str)
-
-        levels_s = sorted(pd.Series(s_used).dropna().unique().tolist(), key=lambda v: v)
-
-        rows = []
-        with st.spinner("Calcolo metriche per ciascun sottogruppo…"):
-            for lv in levels_s:
-                mask_g = (pd.Series(s_used).astype(str) == str(lv)).values
-                yg = y_valid.values[mask_g]
-                if is_binary_test:
-                    ypg = (x_valid[mask_g] == test_pos).astype(int).values
-                else:
-                    xv = x_valid[mask_g].astype(float).values
-                    if 'direction' in locals() and direction == "≤ soglia = positivo":
-                        ypg = (xv <= thr).astype(int)
-                    else:
-                        ypg = (xv >= thr).astype(int)
-
-                TPg, FPg, TNg, FNg = _confusion_from_binary(yg, ypg)
-                mdf = _metric_table(TPg, FPg, TNg, FNg, alpha=0.05)
-                rows.append({
-                    "Sottogruppo": str(lv),
-                    "N": int(len(yg)),
-                    "Sensibilità": float(mdf.loc[mdf["Metrica"]=="Sensibilità","Valore"].values[0]),
-                    "Specificità": float(mdf.loc[mdf["Metrica"]=="Specificità","Valore"].values[0]),
-                    "PPV": float(mdf.loc[mdf["Metrica"]=="PPV","Valore"].values[0]),
-                    "NPV": float(mdf.loc[mdf["Metrica"]=="NPV","Valore"].values[0]),
-                    "Accuratezza": float(mdf.loc[mdf["Metrica"]=="Accuratezza","Valore"].values[0]),
-                    "LR+": float(mdf.loc[mdf["Metrica"]=="LR+","Valore"].values[0]),
-                    "LR−": float(mdf.loc[mdf["Metrica"]=="LR−","Valore"].values[0])
-                })
-
-        subgroup_table = pd.DataFrame(rows)
-        st.markdown("### Risultati per sottogruppi")
-        st.dataframe(subgroup_table.round(4), use_container_width=True)
-        st.caption(
-            "Differenze tra sottogruppi possono dipendere da **campioni piccoli**, **soglie non ottimali** o **prevalenza diversa**. "
-            "Usare cautela e, se possibile, validare su dati indipendenti."
-        )
-
-# =========================
-#   Esporta risultati
-# =========================
-st.markdown("### Esporta nel Results Summary")
-if st.button("➕ Aggiungi analisi diagnostica al Results Summary"):
-    with st.spinner("Salvo i risultati nel Results Summary…"):
-        if "report_items" not in st.session_state:
-            st.session_state.report_items = []
-        item = {
-            "type": "diagnostic_test",
-            "title": f"Analisi diagnostica — Outcome: {outcome} (positivo: {pos_class}), Test: {test_var}",
-            "content": {
-                "outcome_positive": str(pos_class),
-                "test_definition": (
-                    f"Test positivo: {str(test_pos)}" if is_binary_test
-                    else f"Soglia: {float(thr) if 'thr' in locals() else None}, "
-                         f"Direzione: {direction if 'direction' in locals() else None}"
-                ),
-                "confusion_matrix": {
-                    "TP": TP, "FP": FP, "TN": TN, "FN": FN, "Total": TP+FP+TN+FN, "Prevalence": float(prev) if np.isfinite(prev) else None
-                },
-                "metrics": metrics_df.to_dict(orient="records"),
-                "auc": float(auc_val) if auc_val is not None and np.isfinite(auc_val) else None,
-                "average_precision": float(ap_val) if ap_val is not None and np.isfinite(ap_val) else None,
-            }
-        }
-        # DCA
-        if _HAS_SKLEARN and score_for_plots is not None and len(score_for_plots)==len(y_valid):
-            item["content"]["dca"] = _dca_compute(y_valid.values, score_for_plots, np.linspace(0.01,0.99,99)).round(6).to_dict(orient="records")
-        # Calibrazione (se disponibile)
-        if _HAS_SKLEARN and score_for_plots is not None:
-            try:
-                # Ricostruisco probabilità usate (stesso percorso della sezione calibrazione)
-                if 'prob_col' in locals() and prob_col != "— Nessuna —":
-                    rawp = df.loc[valid_mask, prob_col].astype(float).values
-                    use_prob = _clip_probs(rawp)
-                else:
-                    Xs = score_for_plots.reshape(-1, 1).astype(float)
-                    lr_platt = LogisticRegression(solver="liblinear", max_iter=1000)
-                    lr_platt.fit(Xs, y_valid.values)
-                    use_prob = lr_platt.predict_proba(Xs)[:, 1]
-                cal_tbl, brier, c_int, c_slope = _compute_calibration(y_valid.values, use_prob, n_bins=10)
-                item["content"]["calibration"] = {
-                    "brier": float(brier),
-                    "intercept": float(c_int) if np.isfinite(c_int) else None,
-                    "slope": float(c_slope) if np.isfinite(c_slope) else None,
-                    "reliability_table": cal_tbl.round(6).to_dict(orient="records")
-                }
-            except Exception:
-                pass
-
-        if 'subgroup_table' in locals() and isinstance(subgroup_table, pd.DataFrame) and not subgroup_table.empty:
-            item["content"]["subgroups"] = subgroup_table.round(6).to_dict(orient="records")
-
-        st.session_state.report_items.append(item)
-    st.success("Analisi diagnostica aggiunta al Results Summary.")
-
-# =========================
-#  Spiegazione finale
-# =========================
-with st.expander("ℹ️ Spiegazione completa (utente non esperto)", expanded=False):
-    st.markdown("""
-**Cosa misuro?**  
-- **Sensibilità/Specificità**: performance del test su malati/sani.  
-- **PPV/NPV**: dipendono dalla **prevalenza**.  
-- **LR+ / LR− (con IC)**: aggiornano l’evidenza diagnostica (Bayes).  
-- **AUC / AP**: discriminazione complessiva; **AP** utile con classi sbilanciate.  
-- **DCA**: utilità clinica su diverse **soglie di decisione**.  
-- **Calibrazione**: coerenza tra **probabilità predette** e **tassi osservati**.
-
-**Calibrazione (come leggerla)**  
-- **Reliability diagram**: punti sulla diagonale ⇒ buona calibrazione; sopra ⇒ **sottostima**; sotto ⇒ **sovrastima**.  
-- **Brier score** (0 migliore): errore quadratico medio delle probabilità.  
-- **Intercept ≈ 0** e **Slope ≈ 1** sono ideali; **Slope < 1** spesso indica **overfitting**.
-
-**Bayes (probabilità post-test)**  
-""")
-    st.latex(r"\text{odds}_{post} = \text{odds}_{pre} \times LR")
-    st.latex(r"p_{post} = \frac{\text{odds}_{post}}{1+\text{odds}_{post}}")
-    st.markdown("""
-Esempio: pre-test 30% ⇒ odds=0.30/0.70≈0.43. Con **LR+=5** ⇒ odds_post=2.15 ⇒ p_post≈0.68.
-
-**Avvertenze**  
-- La calibrazione qui è stimata **sugli stessi dati** se non si forniscono probabilità esterne: ciò può **ottimisticamente** valutare l’aderenza.  
-- Per una stima robusta, usare **probabilità da validazione esterna** o procedere con **cross-validation/bootstrapping**.
-""")
+# ──────────────────────────────────────────────────────────────────────────────
+# Navigazione
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown("---")
+nav1, nav2 = st.columns(2)
+with nav1:
+    if st.button("⬅️ Torna: Regression", use_container_width=True, key=k("go_prev")):
+        st.switch_page("pages/8_🧮_Regression.py")
+with nav2:
+    if st.button("➡️ Vai: Agreement", use_container_width=True, key=k("go_next")):
+        # adatti il nome del file se diverso
+        try:
+            st.switch_page("pages/10_🧾_Agreement.py")
+        except Exception:
+            pass
