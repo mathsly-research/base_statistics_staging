@@ -64,7 +64,7 @@ def k(name: str) -> str:
 # Helper: ROC/PR, metriche e tabelle
 # ──────────────────────────────────────────────────────────────────────────────
 def auc_mann_whitney(y_true: np.ndarray, score: np.ndarray) -> float:
-    """AUC = probabilità che uno score positivo superi uno negativo (U di Mann–Whitney)."""
+    """AUC = Pr(score_pos > score_neg) via U di Mann–Whitney."""
     try:
         from scipy.stats import rankdata
         y = np.asarray(y_true).astype(int)
@@ -78,21 +78,18 @@ def auc_mann_whitney(y_true: np.ndarray, score: np.ndarray) -> float:
         return float("nan")
 
 def roc_curve_strict(y_true: np.ndarray, score: np.ndarray, greater_is_positive: bool = True):
-    """ROC corretta: soglie ai valori distinti dello score (desc), gestione dei tie, include (0,0) e (1,1)."""
+    """ROC corretta con soglie ai valori distinti, gestione dei tie, include (0,0) e (1,1)."""
     y = np.asarray(y_true).astype(int)
     s = np.asarray(score).astype(float)
-    if not greater_is_positive:
-        s = -s
+    if not greater_is_positive: s = -s
     P = int((y == 1).sum()); N = int((y == 0).sum())
-    if P == 0 or N == 0:
-        return np.array([0.0, 1.0]), np.array([0.0, 1.0]), np.array([np.nan])
+    if P == 0 or N == 0: return np.array([0.0, 1.0]), np.array([0.0, 1.0]), np.array([np.nan])
     order = np.argsort(-s, kind="mergesort")
     ys, ss = y[order], s[order]
     fpr = [0.0]; tpr = [0.0]; thr_list = [np.inf]
-    tp = 0; fp = 0; i = 0; n = len(ys)
+    tp = fp = 0; i = 0; n = len(ys)
     while i < n:
-        thr = ss[i]
-        tp_inc = 0; fp_inc = 0
+        thr = ss[i]; tp_inc = fp_inc = 0
         while i < n and ss[i] == thr:
             if ys[i] == 1: tp_inc += 1
             else: fp_inc += 1
@@ -104,26 +101,24 @@ def roc_curve_strict(y_true: np.ndarray, score: np.ndarray, greater_is_positive:
     return np.array(fpr), np.array(tpr), np.array(thr_list)
 
 def pr_curve(y_true: np.ndarray, score: np.ndarray, greater_is_positive: bool = True):
-    """Precision-Recall con soglie ai valori distinti."""
+    """Precision–Recall con step ai valori distinti."""
     y = np.asarray(y_true).astype(int)
     s = np.asarray(score).astype(float)
     if not greater_is_positive: s = -s
     order = np.argsort(-s, kind="mergesort")
     ys = y[order]
-    tp = 0; fp = 0
-    P = int((y == 1).sum())
+    tp = fp = 0; P = int((y == 1).sum())
     recalls = [0.0]; precisions = [1.0]
     i = 0; n = len(ys)
     while i < n:
         thr = s[order][i]
-        tp_inc = 0; fp_inc = 0
+        tp_inc = fp_inc = 0
         while i < n and s[order][i] == thr:
             if ys[i] == 1: tp_inc += 1
             else: fp_inc += 1
             i += 1
         tp += tp_inc; fp += fp_inc
-        rec = tp / max(P, 1)
-        prec = tp / max(tp + fp, 1)
+        rec = tp / max(P, 1); prec = tp / max(tp + fp, 1)
         recalls.append(rec); precisions.append(prec)
     return np.array(recalls), np.array(precisions)
 
@@ -131,20 +126,16 @@ def metrics_at_threshold(y_true: np.ndarray, score: np.ndarray, thr: float, grea
     """Metriche a una soglia data."""
     y = np.asarray(y_true).astype(int)
     s = np.asarray(score).astype(float)
-    if greater_is_positive:
-        yhat = (s >= thr).astype(int)
-    else:
-        yhat = (s <= thr).astype(int)
+    if greater_is_positive: yhat = (s >= thr).astype(int)
+    else:                   yhat = (s <= thr).astype(int)
 
     TP = int(((y == 1) & (yhat == 1)).sum())
     TN = int(((y == 0) & (yhat == 0)).sum())
     FP = int(((y == 0) & (yhat == 1)).sum())
     FN = int(((y == 1) & (yhat == 0)).sum())
 
-    sens = TP / max(TP + FN, 1)
-    spec = TN / max(TN + FP, 1)
-    ppv  = TP / max(TP + FP, 1)
-    npv  = TN / max(TN + FN, 1)
+    sens = TP / max(TP + FN, 1); spec = TN / max(TN + FP, 1)
+    ppv  = TP / max(TP + FP, 1); npv  = TN / max(TN + FN, 1)
     acc  = (TP + TN) / max(len(y), 1)
     bacc = (sens + spec) / 2.0
     f1   = (2 * ppv * sens) / max(ppv + sens, 1e-12)
@@ -161,11 +152,8 @@ def build_threshold_table(y_true: np.ndarray, score: np.ndarray, greater_is_posi
     """Tabella metriche per tutte le soglie distinte (ordinate per soglia)."""
     s = np.asarray(score).astype(float)
     thr_unique = np.unique(np.sort(s))
-    rows = []
-    for thr in thr_unique:
-        rows.append(metrics_at_threshold(y_true, score, thr, greater_is_positive))
+    rows = [metrics_at_threshold(y_true, score, thr, greater_is_positive) for thr in thr_unique]
     dfm = pd.DataFrame(rows).sort_values("threshold")
-    # suggerimenti soglia
     best_youden = dfm.loc[dfm["Youden"].idxmax(), "threshold"] if not dfm["Youden"].isna().all() else np.nan
     best_f1 = dfm.loc[dfm["F1"].idxmax(), "threshold"] if not dfm["F1"].isna().all() else np.nan
     return dfm, float(best_youden), float(best_f1)
@@ -202,8 +190,7 @@ all_cols = list(df.columns)
 # STEP 1 — Selezione variabili
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("### 1) Seleziona outcome e score")
-
-c1, c2, c3 = st.columns([2, 2, 1.2])
+c1, c2, c3 = st.columns([2, 2, 1.4])
 with c1:
     y_col = st.selectbox("Outcome (binario o categoriale)", options=all_cols, key=k("y"))
 with c2:
@@ -234,8 +221,6 @@ if y.nunique(dropna=True) < 2:
 # STEP 2 — Scelta soglia e metriche
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("### 2) Soglia e metriche")
-
-# Tabella completa (per suggerire soglie)
 df_thr, thr_youden, thr_f1 = build_threshold_table(y.values, s.values, greater_is_positive)
 
 colA, colB = st.columns([1.6, 1.4])
@@ -248,52 +233,35 @@ with colB:
         st.warning("Lo score è costante: non è possibile costruire una curva ROC/PR.")
     min_s, max_s = float(np.nanmin(s)), float(np.nanmax(s))
     step = max((max_s - min_s) / 100.0, 1e-6)
-    thr_manual = st.slider("Soglia manuale",
+    thr_manual = st.slider("Soglia manuale (assoluta)",
                            min_value=min_s, max_value=max_s,
                            value=float(np.percentile(s.dropna(), 50)) if s.notna().any() else 0.5,
                            step=step, key=k("thr_manual"))
 
-if thr_mode.startswith("Ottimizza Youden"):
-    thr = thr_youden
-elif thr_mode.startswith("Ottimizza F1"):
-    thr = thr_f1
-else:
-    thr = thr_manual
+if   thr_mode.startswith("Ottimizza Youden"): thr = thr_youden
+elif thr_mode.startswith("Ottimizza F1"):     thr = thr_f1
+else:                                         thr = thr_manual
 
 # metriche a soglia selezionata
-M = metrics_at_threshold(y.values, s.values, thr, greater_is_positive)
+M   = metrics_at_threshold(y.values, s.values, thr, greater_is_positive)
 AUC = auc_mann_whitney(y.values, s.values)
 
-# pannello metriche (con brevi spiegazioni)
+# pannello metriche con spiegazioni
 m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("Accuracy", f"{M['Acc']:.3f}")
-m1.caption("Quota di classificazioni corrette (dipende dal bilanciamento delle classi).")
-m2.metric("Sensibilità (TPR)", f"{M['Sens']:.3f}")
-m2.caption("Pr(positivo predetto | positivo vero): capacità di cogliere i veri positivi.")
-m3.metric("Specificità (TNR)", f"{M['Spec']:.3f}")
-m3.caption("Pr(negativo predetto | negativo vero): evita falsi positivi.")
-m4.metric("PPV (Precision)", f"{M['PPV']:.3f}")
-m4.caption("Pr(positivo vero | positivo predetto): utilità in contesti clinici di conferma.")
-m5.metric("NPV", f"{M['NPV']:.3f}")
-m5.caption("Pr(negativo vero | negativo predetto): utilità per escludere la malattia.")
+m1.metric("Accuracy", f"{M['Acc']:.3f}");   m1.caption("Quota di classificazioni corrette (dipende dal bilanciamento).")
+m2.metric("Sensibilità (TPR)", f"{M['Sens']:.3f}"); m2.caption("Pr(positivo predetto | positivo vero).")
+m3.metric("Specificità (TNR)", f"{M['Spec']:.3f}"); m3.caption("Pr(negativo predetto | negativo vero).")
+m4.metric("PPV (Precision)", f"{M['PPV']:.3f}");    m4.caption("Pr(positivo vero | positivo predetto).")
+m5.metric("NPV", f"{M['NPV']:.3f}");                m5.caption("Pr(negativo vero | negativo predetto).")
 
 m6, m7, m8, m9, m10 = st.columns(5)
-m6.metric("Balanced Acc.", f"{M['BAcc']:.3f}")
-m6.caption("Media di Sens e Spec: robusta a classi sbilanciate.")
-m7.metric("F1", f"{M['F1']:.3f}")
-m7.caption("Media armonica tra Precision (PPV) e Recall (Sensibilità).")
-m8.metric("MCC", f"{M['MCC']:.3f}")
-m8.caption("Correlazione tra vero e predetto (−1…1): robusto allo sbilanciamento.")
-m9.metric("LR+", f"{M['LR_plus']:.2f}")
-m9.caption("Quanto aumenta l’odds di malattia se il test è positivo (idealmente ≫1).")
-m10.metric("LR−", f"{M['LR_minus']:.2f}")
-m10.caption("Quanto resta l’odds con test negativo (idealmente ≪1).")
+m6.metric("Balanced Acc.", f"{M['BAcc']:.3f}"); m6.caption("Media di Sens e Spec: robusta a sbilanciamento.")
+m7.metric("F1", f"{M['F1']:.3f}");             m7.caption("Media armonica tra Precision e Recall.")
+m8.metric("MCC", f"{M['MCC']:.3f}");           m8.caption("Correlazione vero↔predetto (−1…1).")
+m9.metric("LR+", f"{M['LR_plus']:.2f}");       m9.caption("Aumento dell’odds se test positivo (≫1 meglio).")
+m10.metric("LR−", f"{M['LR_minus']:.2f}");     m10.caption("Riduzione dell’odds se test negativo (≪1 meglio).")
 
-st.markdown(
-    f"**Soglia corrente:** `{thr:.6g}`  "
-    f"• **Indice di Youden:** `{M['Youden']:.3f}`  "
-    f"• **AUC (ROC):** `{AUC:.3f}`"
-)
+st.markdown(f"**Soglia corrente:** `{thr:.6g}` • **Indice di Youden:** `{M['Youden']:.3f}` • **AUC (ROC):** `{AUC:.3f}`")
 st.caption("AUC misura la discriminazione complessiva (0.5=casuale, >0.8=ottima, 1=perfetta).")
 
 # Matrice di confusione
@@ -302,13 +270,12 @@ cm = confusion_table_counts_percent(M["TN"], M["FP"], M["FN"], M["TP"])
 st.dataframe(cm, use_container_width=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# STEP 3 — Grafici (ROC classica + PR + distribuzione p̂)
+# STEP 3 — Grafici (ROC classica + PR + distribuzione score)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("### 3) Grafici")
-
 left, right = st.columns(2)
 
-# ROC (curva verde, area grigia, diagonale, marker soglia)
+# ROC classica (curva verde, area grigia, diagonale, marker soglia)
 with left:
     if px is not None and go is not None and s.notna().any():
         fpr, tpr, thr_list = roc_curve_strict(y.values, s.values, greater_is_positive)
@@ -319,13 +286,9 @@ with left:
             fill="tozeroy", fillcolor="rgba(128,128,128,0.35)",
             name=f"ROC (AUC={AUC:.3f})"
         ))
-        figroc.add_shape(type="line", x0=0, y0=0, x1=1, y1=1,
-                         line=dict(color="rgba(0,0,0,0.5)", dash="dash"))
-        # punto alla soglia corrente
-        fpr_thr = 1 - M["Spec"]
-        tpr_thr = M["Sens"]
+        figroc.add_shape(type="line", x0=0, y0=0, x1=1, y1=1, line=dict(color="rgba(0,0,0,0.5)", dash="dash"))
         figroc.add_trace(go.Scatter(
-            x=[fpr_thr], y=[tpr_thr], mode="markers",
+            x=[1 - M["Spec"]], y=[M["Sens"]], mode="markers",
             marker=dict(symbol="x", size=10, color="#2ecc71"),
             name=f"Soglia {thr:.2f}"
         ))
@@ -339,21 +302,76 @@ with left:
                             scaleanchor="x", scaleratio=1)
         st.plotly_chart(figroc, use_container_width=True)
 
-# PR curve + distribuzione dello score per classe in tab affiancato
+# PR curve + distribuzione score (con soglie annotabili: percentili o valori assoluti)
 with right:
     if px is not None and go is not None and s.notna().any():
         t1, t2 = st.tabs(["📈 Precision–Recall", "📊 Distribuzione score"])
+
         with t1:
             rec, prec = pr_curve(y.values, s.values, greater_is_positive)
+            prevalenza = float((y == 1).mean())
+
+            st.markdown("**Annotazioni sulla curva**")
+            r1c1, r1c2 = st.columns([1.2, 1.6])
+            with r1c1:
+                show_current_thr = st.checkbox("Mostra soglia corrente", value=True, key=k("pr_show_cur"))
+            with r1c2:
+                add_compare = st.checkbox("Aggiungi soglie di confronto", value=True, key=k("pr_add_cmp"))
+
+            method = st.radio("Metodo per le soglie di confronto", ["Percentili", "Valori assoluti"],
+                              horizontal=True, key=k("pr_method"))
+
+            low_thr = high_thr = None
+            if add_compare:
+                if method == "Percentili":
+                    pct_low, pct_high = st.slider("Seleziona percentili (basso, alto)",
+                                                  min_value=0, max_value=100, value=(10, 90), step=1, key=k("pr_pcts"))
+                    if s.notna().any():
+                        low_thr  = float(np.percentile(s.dropna(), pct_low))
+                        high_thr = float(np.percentile(s.dropna(), pct_high))
+                else:
+                    min_s, max_s = float(np.nanmin(s)), float(np.nanmax(s))
+                    default_low  = min_s + 0.1 * (max_s - min_s)
+                    default_high = min_s + 0.9 * (max_s - min_s)
+                    low_thr, high_thr = st.slider("Valori assoluti (basso, alto)",
+                                                  min_value=min_s, max_value=max_s,
+                                                  value=(default_low, default_high),
+                                                  step=max((max_s - min_s) / 100.0, 1e-6),
+                                                  key=k("pr_abs"))
+
             figpr = go.Figure()
             figpr.add_trace(go.Scatter(x=rec, y=prec, mode="lines", line_shape="hv", name="PR"))
-            # baseline = prevalenza
-            prev = float((y == 1).mean())
-            figpr.add_hline(y=prev, line_dash="dash")
-            figpr.update_layout(template="simple_white", title="Curva Precision–Recall",
-                                xaxis_title="Recall (Sensibilità)", yaxis_title="Precision (PPV)")
-            figpr.update_xaxes(range=[0, 1]); figpr.update_yaxes(range=[0, 1])
+            figpr.add_hline(y=prevalenza, line_dash="dash",
+                            annotation_text="Prevalenza", annotation_position="bottom right")
+
+            def add_point_with_label(fig, thr_value: float, label: str, dy: int = -40):
+                try:
+                    Mx = metrics_at_threshold(y.values, s.values, float(thr_value), greater_is_positive)
+                    r = float(Mx["Sens"]); p = float(Mx["PPV"])
+                    fig.add_trace(go.Scatter(x=[r], y=[p], mode="markers",
+                                             marker=dict(size=10, color="#f39c12"), showlegend=False))
+                    fig.add_annotation(x=r, y=p, text=f"{label}<br>P={p:.2f}, R={r:.2f}",
+                                       showarrow=True, arrowhead=2, ax=0, ay=dy,
+                                       bgcolor="rgba(255,255,255,0.9)")
+                except Exception:
+                    pass
+
+            if show_current_thr:
+                add_point_with_label(figpr, thr, f"soglia {thr:.3g}", dy=-50)
+            if add_compare and (low_thr is not None) and (high_thr is not None):
+                add_point_with_label(figpr, low_thr,  f"thr {low_thr:.3g}",  dy=40)
+                add_point_with_label(figpr, high_thr, f"thr {high_thr:.3g}", dy=-40)
+
+            figpr.update_layout(
+                template="simple_white",
+                title="Curva Precision–Recall (con soglie annotate)",
+                xaxis_title="Recall (Sensibilità)", yaxis_title="Precision (PPV)",
+                height=420, legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="left", x=0),
+            )
+            figpr.update_xaxes(range=[0, 1], showline=True, linewidth=2, linecolor="black")
+            figpr.update_yaxes(range=[0, 1], showline=True, linewidth=2, linecolor="black")
             st.plotly_chart(figpr, use_container_width=True)
+
         with t2:
             df_plot = pd.DataFrame({"score": s, "y": y})
             df_plot["Classe"] = df_plot["y"].map({0: "Classe 0", 1: "Classe 1"})
@@ -366,11 +384,9 @@ with right:
 
 with st.expander("ℹ️ Come leggere i grafici", expanded=False):
     st.markdown(
-        "- **ROC**: curva verde con **area grigia** (AUC). La **diagonale** è il caso casuale. "
-        "Il marcatore indica la coppia (**FPR**, **TPR**) alla **soglia scelta**.  \n"
-        "- **PR**: utile con classi sbilanciate; la linea orizzontale tratteggiata è la **prevalenza** (baseline).  \n"
-        "- **Distribuzione score**: una buona separazione tra le due classi indica **buona discriminazione**; "
-        "la linea tratteggiata è la **soglia corrente**."
+        "- **ROC**: curva verde con **area grigia** (AUC). La diagonale è il caso casuale; il marcatore è la **soglia**.  \n"
+        "- **PR**: utile con classi sbilanciate; la linea tratteggiata è la **prevalenza**. I punti annotati mostrano Precision/Recall alle soglie scelte (percentili **o** valori assoluti).  \n"
+        "- **Distribuzione score**: separazione netta ⇒ migliore discriminazione; la linea tratteggiata è la soglia corrente."
     )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -395,7 +411,6 @@ with nav1:
         st.switch_page("pages/8_🧮_Regression.py")
 with nav2:
     if st.button("➡️ Vai: Agreement", use_container_width=True, key=k("go_next")):
-        # adatti il nome del file se diverso
         try:
             st.switch_page("pages/10_🧾_Agreement.py")
         except Exception:
