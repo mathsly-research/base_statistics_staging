@@ -1,454 +1,486 @@
 # -*- coding: utf-8 -*-
+# pages/11_🧭_Analisi_di_Sopravvivenza.py
+from __future__ import annotations
+
+import math
+import itertools
 import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
 
-from core.state import init_state
-
-# Opzionali
+# Plot
 try:
-    import lifelines
-    from lifelines import KaplanMeierFitter, NelsonAalenFitter
-    from lifelines import CoxPHFitter, WeibullAFTFitter
+    import plotly.graph_objects as go
+    import plotly.express as px
+except Exception:
+    go = None
+    px = None
+
+# Lifelines per KM, log-rank, Cox (opzionale: il modulo funziona in fallback)
+try:
+    from lifelines import KaplanMeierFitter, CoxPHFitter
     from lifelines.statistics import logrank_test, multivariate_logrank_test, proportional_hazard_test
-    _HAS_LIFELINES = True
+    _has_lifelines = True
 except Exception:
-    _HAS_LIFELINES = False
+    _has_lifelines = False
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Data store centralizzato (come negli altri moduli)
+# ──────────────────────────────────────────────────────────────────────────────
 try:
-    from scipy import stats as spstats
-    _HAS_SCIPY = True
+    from data_store import ensure_initialized, get_active, stamp_meta
 except Exception:
-    _HAS_SCIPY = False
+    def ensure_initialized():
+        st.session_state.setdefault("ds_active_df", None)
+        st.session_state.setdefault("ds_meta", {"version": 0, "updated_at": None, "source": None, "note": ""})
+    def get_active(required: bool = True):
+        ensure_initialized()
+        df_ = st.session_state.get("ds_active_df")
+        if required and (df_ is None or df_.empty):
+            st.error("Nessun dataset attivo. Importi i dati e completi la pulizia.")
+            st.stop()
+        return df_
+    def stamp_meta():
+        ensure_initialized()
+        meta = st.session_state["ds_meta"]
+        ver = meta.get("version", 0)
+        src = meta.get("source") or "-"
+        ts = meta.get("updated_at")
+        when = "-"
+        if ts:
+            from datetime import datetime
+            when = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+        c1, c2, c3 = st.columns(3)
+        with c1: st.metric("Versione dati", ver)
+        with c2: st.metric("Origine", src)
+        with c3: st.metric("Ultimo aggiornamento", when)
 
-import plotly.graph_objects as go
+# ──────────────────────────────────────────────────────────────────────────────
+# Config pagina + nav
+# ──────────────────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="🧭 Analisi di Sopravvivenza", layout="wide")
+try:
+    from nav import sidebar
+    sidebar()
+except Exception:
+    pass
 
-# ===========================================================
-# Utility comuni
-# ===========================================================
-def _use_active_df() -> pd.DataFrame:
-    if "df_working" in st.session_state and st.session_state.df_working is not None:
-        return st.session_state.df_working.copy()
-    return st.session_state.df.copy()
+KEY = "surv"
+def k(name: str) -> str:
+    return f"{KEY}_{name}"
 
-def _is_binary_like(s: pd.Series) -> bool:
-    vals = pd.Series(s).dropna().unique().tolist()
-    return len(vals) == 2
+# ──────────────────────────────────────────────────────────────────────────────
+# Utility: KM fallback (se lifelines assente), log-rank 2 gruppi, risk table
+# ──────────────────────────────────────────────────────────────────────────────
+def _km_curve_fallback(time: np.ndarray, event: np.ndarray):
+    """Restituisce (t, S(t)) step-wise senza CI."""
+    # tempi evento unici >0
+    df = pd.DataFrame({"t": time, "e": event}).sort_values("t")
+    df = df[df["t"].notna()]
+    t_unique = np.sort(df.loc[df["e"] == 1, "t"].unique())
+    if t_unique.size == 0:
+        return np.array([0.0, float(df["t"].max() or 1.0)]), np.array([1.0, 1.0])
+    n = len(df)
+    s = 1.0
+    t_list = [0.0]; S_list = [1.0]
+    for t in t_unique:
+        at_risk = ((df["t"] >= t)).sum()
+        d = ((df["t"] == t) & (df["e"] == 1)).sum()
+        if at_risk > 0:
+            s *= (1.0 - d / at_risk)
+        t_list.append(float(t)); S_list.append(float(s))
+    # mantieni costoante fino al max tempo osservato
+    t_list.append(float(df["t"].max()))
+    S_list.append(float(S_list[-1]))
+    return np.array(t_list, dtype=float), np.array(S_list, dtype=float)
 
-def _as_event(series: pd.Series, event_value):
-    """Restituisce indicatori 0/1 dove 1 = evento (== event_value)."""
-    s = series.copy()
-    return (s == event_value).astype(int)
+def _median_survival_from_km(t: np.ndarray, S: np.ndarray) -> float | None:
+    if len(t) == 0: return None
+    below = np.where(S <= 0.5)[0]
+    if len(below) == 0:
+        return None
+    i = below[0]
+    return float(t[i])
 
-def _numeric(series: pd.Series):
-    return pd.to_numeric(series, errors="coerce")
-
-def _group_levels(s: pd.Series):
-    return sorted(pd.Series(s).dropna().unique().tolist(), key=lambda x: str(x))
-
-def _km_plotly_from_kmf(kmf: KaplanMeierFitter, name="KM", show_ci=False):
-    """Crea una traccia Plotly stepwise dalla stima KM di lifelines."""
-    t = kmf.survival_function_.index.values
-    s = kmf.survival_function_.iloc[:, 0].values
-    trace = go.Scatter(x=t, y=s, mode="lines", name=name, line_shape="hv")
-    traces = [trace]
-    if show_ci and hasattr(kmf, "confidence_interval_"):
-        ci = kmf.confidence_interval_
-        lo = ci.iloc[:, 0].values
-        hi = ci.iloc[:, 1].values
-        traces.append(go.Scatter(x=t, y=hi, mode="lines", line=dict(width=0), showlegend=False))
-        traces.append(go.Scatter(x=t, y=lo, mode="lines", fill="tonexty", name=f"{name} (IC95%)",
-                                 line=dict(width=0)))
-    return traces
-
-def _risk_table_from_kmf(kmf: KaplanMeierFitter, at_times: list[float]):
-    """Restituisce n_at_risk a tempi specificati (interpolando allo step precedente)."""
-    ev = kmf.event_table  # columns include 'at_risk'
-    # per ogni t*, prendi at_risk all'ultimo tempo <= t*
-    times = ev.index.values
-    at_risk = ev['at_risk'].values
-    out = []
-    for tt in at_times:
-        idx = np.searchsorted(times, tt, side="right") - 1
-        idx = np.clip(idx, 0, len(times)-1)
-        out.append(int(at_risk[idx]))
-    return out
-
-def _parse_timepoints(text: str):
+def _logrank_two_groups_fallback(t1, e1, t0, e0):
+    """Log-rank per 2 gruppi (statistica ~ χ²(1))."""
+    # unisci tempi evento
+    times = np.sort(np.unique(np.concatenate([t1[e1==1], t0[e0==1]])))
+    Z = 0.0; V = 0.0
+    for t in times:
+        n1 = ((t1 >= t)).sum(); n0 = ((t0 >= t)).sum(); n = n1 + n0
+        d1 = ((t1 == t) & (e1 == 1)).sum()
+        d0 = ((t0 == t) & (e0 == 1)).sum()
+        d = d1 + d0
+        if n > 1 and n1 > 0 and n0 > 0:
+            exp1 = d * (n1 / n)
+            Z += (d1 - exp1)
+            V += (n1 * n0 * d * (n - d)) / (n**2 * (n - 1)) if (n - 1) > 0 else 0.0
+    chi2 = (Z**2) / V if V > 0 else np.nan
+    # p-value (approx) senza SciPy: usa funzione di ripiego
     try:
-        vals = [float(x.strip()) for x in text.split(",") if x.strip() != ""]
-        return [v for v in vals if np.isfinite(v)]
+        from scipy.stats import chi2 as chi2dist
+        p = float(chi2dist.sf(chi2, df=1))
     except Exception:
-        return []
+        # approssimazione semplice per df=1 (SF ~ exp(-x/2) per code)
+        p = math.exp(-chi2 / 2.0) if chi2 == chi2 else np.nan
+    return float(chi2), float(p)
 
-def _design_matrix(df: pd.DataFrame, covars: list[str]):
-    """Dummies drop_first per le categoriche; float per le numeriche."""
-    X = df[covars].copy()
-    X = pd.get_dummies(X, drop_first=True)
-    for c in X.columns:
-        X[c] = pd.to_numeric(X[c], errors="coerce")
-    return X
-
-# ===========================================================
-# Pagina
-# ===========================================================
-init_state()
-st.title("🧭 Analisi di Sopravvivenza")
-
-# Check dataset
-if "df" not in st.session_state or st.session_state.df is None:
-    st.warning("Nessun dataset disponibile. Carichi i dati in **Step 0 — Upload Dataset**.")
-    st.page_link("pages/0_📂_Upload_Dataset.py", label="➡️ Vai a Upload Dataset", icon="📂")
-    st.stop()
-
-df = _use_active_df()
-if df is None or df.empty:
-    st.error("Il dataset attivo è vuoto.")
-    st.stop()
-
-# -----------------------------------------------------------
-# Selettori base
-# -----------------------------------------------------------
-st.subheader("Selezione variabili")
-num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-time_col = st.selectbox("Tempo di follow-up (numerico, stessa unità per tutti):", options=num_cols)
-event_col = st.selectbox("Indicatore di evento/censura (binario o due categorie):", options=[c for c in df.columns if c != time_col])
-
-ev_vals = _group_levels(df[event_col])
-if len(ev_vals) != 2:
-    st.error("La variabile evento deve avere esattamente due livelli (es. 0/1).")
-    st.stop()
-
-event_value = st.selectbox("Valore che indica **evento** (l'altro sarà censura):", options=ev_vals, index=1 if 1 in ev_vals else 0)
-
-# Stratificazione facoltativa (per KM/log-rank)
-group_var = st.selectbox("Stratificazione (opzionale, per curve KM e log-rank):", options=["— Nessuna —"] + [c for c in df.columns if c not in [time_col, event_col]])
-
-# Covariate per Cox/AFT (opzionali)
-covariates = st.multiselect("Covariate per il modello di Cox (opzionale):", options=[c for c in df.columns if c not in [time_col, event_col]])
-
-# Tempi per S(t) e tabella a rischio
-suggest = np.quantile(pd.to_numeric(df[time_col], errors="coerce").dropna(), [0.25,0.5,0.75])
-tp_text = st.text_input("Tempi specifici (separati da virgola) per riportare S(t) e n a rischio (opzionale)", value=", ".join([f"{x:.2f}" for x in suggest]))
-
-# Prepara dati
-T = _numeric(df[time_col])
-E = _as_event(df[event_col], event_value)
-mask = ~(T.isna() | E.isna())
-if group_var != "— Nessuna —":
-    G = df[group_var]
-    mask = mask & (~G.isna())
-else:
-    G = None
-
-T = T[mask]; E = E[mask]
-if group_var != "— Nessuna —":
-    G = G[mask]
-
-n_all = int(mask.sum())
-n_events = int(E.sum())
-n_cens = int(n_all - n_events)
-st.markdown(f"**Campione analizzabile**: N={n_all} (Eventi={n_events}, Censure={n_cens})")
-
-# =========================
-#   Kaplan–Meier & Nelson–Aalen
-# =========================
-left, right = st.columns(2)
-
-if not _HAS_LIFELINES:
-    st.error("Per l’analisi di sopravvivenza completa è necessario installare `lifelines` (es.: `pip install lifelines`).")
-else:
-    with left:
-        with st.spinner("Stimo le curve di sopravvivenza (Kaplan–Meier)…"):
-            fig_km = go.Figure()
-            if group_var == "— Nessuna —":
-                kmf = KaplanMeierFitter()
-                kmf.fit(T, event_observed=E, label="Totale")
-                for tr in _km_plotly_from_kmf(kmf, name="Totale", show_ci=True):
-                    fig_km.add_trace(tr)
-            else:
-                for g in _group_levels(G):
-                    sel = (G == g)
-                    if sel.sum() == 0: 
-                        continue
-                    kmf = KaplanMeierFitter()
-                    kmf.fit(T[sel], event_observed=E[sel], label=str(g))
-                    for tr in _km_plotly_from_kmf(kmf, name=str(g), show_ci=False):
-                        fig_km.add_trace(tr)
-
-            fig_km.update_layout(title="Curva di sopravvivenza (Kaplan–Meier)",
-                                 xaxis_title=f"Tempo ({time_col})",
-                                 yaxis_title="S(t)", yaxis=dict(range=[0,1]))
-            st.plotly_chart(fig_km, use_container_width=True)
-
-        st.caption(
-            "La **curva KM** stima la probabilità di **sopravvivere oltre t** (S(t)). "
-            "I **salti** avvengono agli eventi; le **censure** non causano salti ma riducono il numero a rischio. "
-            "L’IC95% è mostrato quando si stima una sola curva."
-        )
-
-    with right:
-        with st.spinner("Calcolo hazard cumulativa (Nelson–Aalen)…"):
-            fig_na = go.Figure()
-            if group_var == "— Nessuna —":
-                naf = NelsonAalenFitter()
-                naf.fit(T, event_observed=E, label="Totale")
-                fig_na.add_trace(go.Scatter(x=naf.cumulative_hazard_.index.values,
-                                            y=naf.cumulative_hazard_.iloc[:,0].values,
-                                            mode="lines", name="Totale", line_shape="hv"))
-            else:
-                for g in _group_levels(G):
-                    sel = (G == g)
-                    if sel.sum() == 0:
-                        continue
-                    naf = NelsonAalenFitter()
-                    naf.fit(T[sel], event_observed=E[sel], label=str(g))
-                    fig_na.add_trace(go.Scatter(x=naf.cumulative_hazard_.index.values,
-                                                y=naf.cumulative_hazard_.iloc[:,0].values,
-                                                mode="lines", name=str(g), line_shape="hv"))
-            fig_na.update_layout(title="Hazard cumulativa (Nelson–Aalen)",
-                                 xaxis_title=f"Tempo ({time_col})",
-                                 yaxis_title="H(t)")
-            st.plotly_chart(fig_na, use_container_width=True)
-
-        st.caption(
-            "L’**hazard cumulativa** \(H(t)\) cresce con gli eventi; pendenze più ripide indicano **rischio istantaneo** maggiore. "
-            "Relazione con la sopravvivenza: \(S(t)=e^{-H(t)}\)."
-        )
-
-    # Mediana di sopravvivenza e S(t) a tempi scelti
-    st.markdown("### Riassunti numerici KM")
-    with st.spinner("Calcolo mediana di sopravvivenza e S(t) a tempi specifici…"):
-        rows = []
-        timepoints = _parse_timepoints(tp_text)
-        if group_var == "— Nessuna —":
-            kmf = KaplanMeierFitter().fit(T, E)
-            med = kmf.median_survival_time_
-            ci_med = kmf.confidence_interval_ if hasattr(kmf, "confidence_interval_") else None
-            med_lo = float(ci_med.iloc[0,0]) if ci_med is not None else np.nan
-            med_hi = float(ci_med.iloc[0,1]) if ci_med is not None else np.nan
-            row = {"Gruppo":"Totale", "Mediana": float(med), "CI 2.5%": med_lo, "CI 97.5%": med_hi}
-            # S(t)
-            for tt in timepoints:
-                row[f"S({tt})"] = float(kmf.predict(tt))
-            rows.append(row)
-        else:
-            for g in _group_levels(G):
-                sel = (G == g)
-                if sel.sum()==0: 
-                    continue
-                kmf = KaplanMeierFitter().fit(T[sel], E[sel])
-                med = kmf.median_survival_time_
-                row = {"Gruppo": str(g), "Mediana": float(med) if np.isfinite(med) else np.nan, "CI 2.5%": np.nan, "CI 97.5%": np.nan}
-                for tt in timepoints:
-                    row[f"S({tt})"] = float(kmf.predict(tt))
-                rows.append(row)
-        km_tbl = pd.DataFrame(rows).round(4)
-        st.dataframe(km_tbl, use_container_width=True)
-        st.caption("**Mediana di sopravvivenza**: tempo al quale S(t)=0.5. Se non raggiunta, la mediana risulta **NaN** o non definita.")
-
-    # Numero a rischio a tempi specifici
-    if len(timepoints) > 0:
-        st.markdown("### Numero a rischio a tempi specifici")
-        with st.spinner("Calcolo numero a rischio…"):
-            risk_rows = []
-            if group_var == "— Nessuna —":
-                kmf = KaplanMeierFitter().fit(T, E)
-                risk_rows.append(["Totale"] + _risk_table_from_kmf(kmf, timepoints))
-            else:
-                for g in _group_levels(G):
-                    sel = (G == g)
-                    if sel.sum()==0: continue
-                    kmf = KaplanMeierFitter().fit(T[sel], E[sel])
-                    risk_rows.append([str(g)] + _risk_table_from_kmf(kmf, timepoints))
-            risk_tbl = pd.DataFrame(risk_rows, columns=["Gruppo"]+[f"t={tt}" for tt in timepoints])
-            st.dataframe(risk_tbl, use_container_width=True)
-            st.caption("**Numero a rischio**: soggetti ancora in osservazione immediatamente prima del tempo indicato.")
-
-    # Log-rank test
-    if group_var != "— Nessuna —":
-        glv = _group_levels(G)
-        if len(glv) >= 2:
-            st.markdown("### Confronto tra curve: Log-rank test")
-            with st.spinner("Eseguo il log-rank test…"):
-                if len(glv) == 2:
-                    g1, g2 = glv[0], glv[1]
-                    res = logrank_test(T[G==g1], T[G==g2], event_observed_A=E[G==g1], event_observed_B=E[G==g2])
-                    st.write(pd.DataFrame({"Statistic":[round(res.test_statistic,4)], "p-value":[res.p_value]}))
-                else:
-                    res = multivariate_logrank_test(T, G, E)
-                    st.write(pd.DataFrame({"Statistic":[round(res.test_statistic,4)], "p-value":[res.p_value]}))
-            st.caption(
-                "Il **log-rank test** verifica l’ipotesi nulla di **curve di sopravvivenza uguali** tra gruppi. "
-                "p-value piccolo → evidenza di differenza tra le curve."
-            )
-
-    # =========================
-    #   Cox PH
-    # =========================
-    st.markdown("## Modello di Cox (Proportional Hazards)")
-    if len(covariates) == 0 and group_var == "— Nessuna —":
-        st.info("Selezioni almeno una covariata o una stratificazione per stimare un modello di Cox.")
+def _numbers_at_risk(df: pd.DataFrame, time_col: str, event_col: str, group_col: str | None, cutpoints: list[float]):
+    out = []
+    if group_col is None:
+        groups = [("Tutti", df)]
     else:
-        with st.spinner("Preparo il dataset per Cox…"):
-            df_cox = pd.DataFrame({"T": T, "E": E})
-            covs = list(covariates)
-            if group_var != "— Nessuna —":
-                covs = [group_var] + covs
-            if len(covs) > 0:
-                X = _design_matrix(df.loc[mask], covs)
-                df_cox = pd.concat([df_cox, X], axis=1)
-        robust = st.checkbox("Errori standard robusti (sandwich)", value=True)
-        with st.spinner("Stimo il modello di Cox…"):
+        groups = [(str(g), gdf) for g, gdf in df.groupby(group_col, dropna=False)]
+    for gname, gdf in groups:
+        t = pd.to_numeric(gdf[time_col], errors="coerce")
+        at_risk = [(t >= cp).sum() for cp in cutpoints]
+        out.append(pd.Series(at_risk, index=cutpoints, name=gname))
+    return pd.DataFrame(out).set_index(pd.Index([g for g, _ in groups]))
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Header
+# ──────────────────────────────────────────────────────────────────────────────
+st.title("🧭 Analisi di Sopravvivenza")
+st.caption("Curve di Kaplan–Meier, test di log-rank e modello di Cox PH con diagnostica. Interfaccia coerente e guidata.")
+
+ensure_initialized()
+df = get_active(required=True)
+with st.expander("Stato dati", expanded=False):
+    stamp_meta()
+if df is None or df.empty:
+    st.stop()
+
+all_cols = list(df.columns)
+num_cols = [c for c in all_cols if pd.api.types.is_numeric_dtype(df[c])]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# STEP 1 — Selezione variabili
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown("### 1) Seleziona le variabili")
+c1, c2, c3 = st.columns([1.4, 1.2, 1.4])
+with c1:
+    time_col = st.selectbox("Tempo di follow-up", options=num_cols, key=k("time"))
+with c2:
+    event_col = st.selectbox("Evento (0/1 o categoriale)", options=all_cols, key=k("event"))
+with c3:
+    group_col = st.selectbox("Gruppo (opzionale)", options=["— nessuno —"] + all_cols, key=k("group"))
+    group_col = None if group_col == "— nessuno —" else group_col
+
+# Preparazione evento binario
+y_raw = df[event_col]
+if pd.api.types.is_numeric_dtype(y_raw) and set(pd.unique(y_raw.dropna())) <= {0, 1}:
+    event_label = 1
+    event = (y_raw == 1).astype(int)
+    st.caption("Evento interpretato come binario {0,1} con '1' = **evento**.")
+else:
+    levels = sorted(y_raw.dropna().astype(str).unique().tolist())
+    event_label = st.selectbox("Qual è il valore che rappresenta **evento** (vs censura)?",
+                               options=levels, key=k("event_label"))
+    event = (y_raw.astype(str) == event_label).astype(int)
+
+time = pd.to_numeric(df[time_col], errors="coerce")
+if (time < 0).any():
+    st.warning("Sono presenti tempi negativi: verranno ignorati nelle analisi.")
+    mask_nonneg = time >= 0
+else:
+    mask_nonneg = np.ones(len(time), dtype=bool)
+
+work = pd.DataFrame({"time": time, "event": event})
+if group_col is not None:
+    work["group"] = df[group_col].astype(str)
+work = work[mask_nonneg].dropna(subset=["time", "event"])
+
+if work.empty:
+    st.error("Dopo la pulizia (NA/tempi negativi) non restano osservazioni utilizzabili.")
+    st.stop()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# STEP 2 — Curve di Kaplan–Meier e test di log-rank
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown("### 2) Curve di Kaplan–Meier e test di log-rank")
+left, right = st.columns([1.6, 1.4])
+
+with left:
+    show_ci = st.checkbox("Mostra intervalli di confidenza 95%", value=True, key=k("km_ci"))
+    show_censors = st.checkbox("Mostra tick di censura", value=False, key=k("km_ticks"))
+    group_palette = px.colors.qualitative.D3 if px is not None else None
+
+    # Disegno
+    if go is not None:
+        fig = go.Figure()
+        groups_iter = [("Tutti", work)] if group_col is None else list(work.groupby("group", dropna=False))
+        for idx, (gname, gdf) in enumerate(groups_iter):
+            t = gdf["time"].to_numpy(float)
+            e = gdf["event"].to_numpy(int)
+            color = (group_palette[idx % len(group_palette)] if group_palette else None)
+
+            if _has_lifelines:
+                km = KaplanMeierFitter()
+                km.fit(t, e, label=str(gname))
+                x = km.survival_function_.index.values.astype(float)
+                y = km.survival_function_[str(gname)].values.astype(float)
+                fig.add_trace(go.Scatter(x=x, y=y, mode="lines", line_shape="hv",
+                                         line=dict(width=3, color=color),
+                                         name=str(gname)))
+                if show_ci:
+                    ci = km.confidence_interval_
+                    low = ci.iloc[:, 0].values.astype(float); high = ci.iloc[:, 1].values.astype(float)
+                    fig.add_trace(go.Scatter(x=x, y=low, line=dict(width=0), showlegend=False,
+                                             hoverinfo="skip", name=None))
+                    fig.add_trace(go.Scatter(x=x, y=high, fill="tonexty",
+                                             fillcolor="rgba(127,127,127,0.15)",
+                                             line=dict(width=0), showlegend=False, hoverinfo="skip", name=None))
+                if show_censors:
+                    # segni di censura sui tempi censurati
+                    cens_t = gdf.loc[gdf["event"] == 0, "time"].values
+                    fig.add_trace(go.Scatter(x=cens_t, y=km.predict(cens_t), mode="markers",
+                                             marker=dict(symbol="line-ns", size=8, color=color),
+                                             name=f"Censura {gname}", showlegend=False, hoverinfo="skip"))
+            else:
+                x, y = _km_curve_fallback(t, e)
+                fig.add_trace(go.Scatter(x=x, y=y, mode="lines", line_shape="hv",
+                                         line=dict(width=3, color=color),
+                                         name=str(gname)))
+        fig.update_layout(template="simple_white", height=460,
+                          title="Curve di sopravvivenza (Kaplan–Meier)",
+                          xaxis_title=f"Tempo ({time_col})", yaxis_title="S(t)")
+        fig.update_yaxes(range=[0, 1], showline=True, linewidth=2, linecolor="black")
+        fig.update_xaxes(showline=True, linewidth=2, linecolor="black")
+        st.plotly_chart(fig, use_container_width=True)
+
+with right:
+    # Mediane e log-rank
+    if _has_lifelines:
+        rows = []
+        if group_col is None:
+            km = KaplanMeierFitter().fit(work["time"], work["event"], label="Tutti")
+            med = km.median_survival_time_
+            low, high = (np.nan, np.nan)
             try:
-                cph = CoxPHFitter()
-                cph.fit(df_cox, duration_col="T", event_col="E", robust=robust, show_progress=False)
-                cph_sum = cph.summary.copy()
-                # Tabella HR
-                hr_tbl = cph_sum[["exp(coef)", "exp(coef) lower 95%", "exp(coef) upper 95%", "p"]].rename(
-                    columns={"exp(coef)":"HR", "exp(coef) lower 95%":"CI 2.5%", "exp(coef) upper 95%":"CI 97.5%", "p":"p-value"}
-                ).round(4)
-                st.dataframe(hr_tbl, use_container_width=True)
-                st.caption(
-                    "**HR > 1**: rischio maggiore all’aumentare della covariata (o rispetto alla categoria di riferimento). "
-                    "**HR < 1**: rischio minore. IC95% che **non** include 1 → effetto statisticamente significativo."
-                )
-                # c-index
+                low, high = km.confidence_interval_.median().values
+            except Exception:
+                pass
+            rows.append(["Tutti", med, low, high, int(work["event"].sum()), int(len(work))])
+        else:
+            for gname, gdf in work.groupby("group", dropna=False):
+                km = KaplanMeierFitter().fit(gdf["time"], gdf["event"], label=str(gname))
+                med = km.median_survival_time_
+                low = high = np.nan
+                rows.append([str(gname), med, low, high, int(gdf["event"].sum()), int(len(gdf))])
+        tbl = pd.DataFrame(rows, columns=["Gruppo", "Mediana", "CI 2.5%", "CI 97.5%", "Eventi", "N"])
+    else:
+        rows = []
+        if group_col is None:
+            x, y = _km_curve_fallback(work["time"].to_numpy(float), work["event"].to_numpy(int))
+            rows.append(["Tutti", _median_survival_from_km(x, y), np.nan, np.nan, int(work["event"].sum()), int(len(work))])
+        else:
+            for gname, gdf in work.groupby("group", dropna=False):
+                x, y = _km_curve_fallback(gdf["time"].to_numpy(float), gdf["event"].to_numpy(int))
+                rows.append([str(gname), _median_survival_from_km(x, y), np.nan, np.nan, int(gdf["event"].sum()), int(len(gdf))])
+        tbl = pd.DataFrame(rows, columns=["Gruppo", "Mediana", "CI 2.5%", "CI 97.5%", "Eventi", "N"])
+
+    st.markdown("**Statistiche riassuntive**")
+    st.dataframe(tbl, use_container_width=True)
+
+    # Log-rank
+    if group_col is not None:
+        levels = list(work["group"].astype(str).unique())
+        if len(levels) == 2:
+            g0 = work[work["group"] == levels[0]]
+            g1 = work[work["group"] == levels[1]]
+            if _has_lifelines:
+                res = logrank_test(g0["time"], g1["time"], g0["event"], g1["event"])
+                st.metric("Log-rank (2 gruppi) — p-value", f"{res.p_value:.4f}")
+            else:
+                chi2, p = _logrank_two_groups_fallback(g1["time"].values, g1["event"].values,
+                                                       g0["time"].values, g0["event"].values)
+                st.metric("Log-rank (2 gruppi) — p-value", f"{p:.4f}" if p == p else "—")
+        elif len(levels) > 2 and _has_lifelines:
+            res = multivariate_logrank_test(work["time"], work["group"], work["event"])
+            st.metric("Log-rank (k gruppi) — p-value", f"{res.p_value:.4f}")
+            # opzionale: pairwise
+            with st.expander("Confronti **pairwise** (Holm-Bonferroni)", expanded=False):
+                pairs = list(itertools.combinations(levels, 2))
+                rows = []
+                for a, b in pairs:
+                    A = work[work["group"] == a]; B = work[work["group"] == b]
+                    p = logrank_test(A["time"], B["time"], A["event"], B["event"]).p_value
+                    rows.append([a, b, p])
+                dfp = pd.DataFrame(rows, columns=["A", "B", "p"])
+                # Holm
+                dfp = dfp.sort_values("p").reset_index(drop=True)
+                m = len(dfp)
+                dfp["p_Holm"] = [min((m - i) * p, 1.0) for i, p in enumerate(dfp["p"])]
+                st.dataframe(dfp, use_container_width=True)
+
+# Numeri a rischio (tabella semplice)
+with st.expander("📊 Numeri a rischio (seleziona tempi)", expanded=False):
+    # punti default = quartili del tempo osservato
+    tmin, tmax = float(work["time"].min()), float(work["time"].max())
+    default_pts = [round(x, 2) for x in np.quantile(work["time"], [0, 0.25, 0.5, 0.75, 1.0])]
+    cutpoints = st.multiselect("Tempi in cui mostrare N a rischio",
+                               options=[round(x, 2) for x in np.linspace(tmin, tmax, 10)],
+                               default=default_pts, key=k("risk_pts"))
+    if cutpoints:
+        risk = _numbers_at_risk(work, "time", "event", group_col, cutpoints)
+        st.dataframe(risk.astype(int), use_container_width=True)
+
+with st.expander("ℹ️ Come leggere KM e log-rank", expanded=False):
+    st.markdown(
+        "- **S(t)** è la probabilità di **non** aver avuto l’evento entro il tempo t (linea a gradini).  \n"
+        "- **Mediana di sopravvivenza**: il tempo in cui S(t)=0.5. Se non raggiunta (curva >0.5), la mediana è **non stimabile**.  \n"
+        "- **Tick di censura**: osservazioni interrotte; non sono eventi ma contribuiscono al denominatore finché osservate.  \n"
+        "- **Log-rank**: confronta globalmente le curve tra gruppi; p-value piccolo ⇒ differenza significativa dei rischi nel tempo (assume **hazard proporzionali**)."
+    )
+
+# ──────────────────────────────────────────────────────────────────────────────
+# STEP 3 — Modello di Cox PH
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown("### 3) Modello di Cox (hazard proporzionali)")
+if not _has_lifelines:
+    st.info("Il modello di Cox richiede **lifelines**. Installare `lifelines` per abilitare la sezione seguente.")
+else:
+    # Scelte variabili
+    covar_opts = [c for c in df.columns if c not in {time_col, event_col}]
+    colA, colB, colC = st.columns([1.6, 1.0, 1.0])
+    with colA:
+        covars = st.multiselect("Covariate (selezionare una o più)", options=covar_opts, key=k("covars"))
+    with colB:
+        zscore = st.checkbox("Standardizza variabili numeriche (z-score)", value=False, key=k("z"))
+    with colC:
+        ties = st.selectbox("Gestione dei tie", options=["efron", "breslow", "exact"], index=0, key=k("ties"))
+
+    if covars:
+        # Costruzione dataframe per Cox (trasformazione categoriche in dummies)
+        X = df[[time_col, event_col] + covars].copy()
+        # evento binario 0/1 (già costruito prima)
+        X[event_col] = event
+        # numeriche → z-score
+        if zscore:
+            for c in covars:
+                if pd.api.types.is_numeric_dtype(X[c]):
+                    s = pd.to_numeric(X[c], errors="coerce")
+                    mu, sd = float(s.mean()), float(s.std(ddof=1))
+                    if sd and sd > 0:
+                        X.loc[:, c] = (s - mu) / sd
+        # categoriche → dummies (drop_first)
+        X = pd.get_dummies(X, columns=[c for c in covars if not pd.api.types.is_numeric_dtype(df[c])],
+                           drop_first=True)
+        X = X.dropna(subset=[time_col, event_col])
+        X = X[X[time_col] >= 0]
+
+        if X.empty or X[event_col].nunique() < 2:
+            st.error("Dati insufficienti per la stima del modello di Cox.")
+        else:
+            cph = CoxPHFitter()
+            try:
+                cph.fit(X, duration_col=time_col, event_col=event_col, show_progress=False, ties=ties)
+                st.markdown("**Tabella dei coefficienti (scala HR)**")
+                summ = cph.summary.copy()
+                # Rinomina e seleziona colonne
+                cols = {
+                    "exp(coef)": "HR",
+                    "exp(coef) lower 95%": "HR CI 2.5%",
+                    "exp(coef) upper 95%": "HR CI 97.5%",
+                    "p": "p"
+                }
+                view = summ.rename(columns=cols)[["HR", "HR CI 2.5%", "HR CI 97.5%", "p"]].copy()
+                view = view.round(3)
+                st.dataframe(view, use_container_width=True)
+
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Log-likelihood", f"{cph.log_likelihood_: .3f}")
                 try:
-                    cindex = float(cph.concordance_index_)
-                    st.write(f"**Concordance index (c-index)**: {cindex:.3f}")
-                    st.caption("Il **c-index** misura la capacità discriminativa del modello (0.5 casuale; 1 perfetto).")
+                    aic_like = -2.0 * cph.log_likelihood_ + 2 * len(cph.params_)
+                    m2.metric("AIC (parz.)", f"{aic_like:.1f}")
+                except Exception:
+                    pass
+                try:
+                    concord = float(cph.concordance_index_)
+                    m3.metric("Concordance index", f"{concord:.3f}")
                 except Exception:
                     pass
 
-                # Forest plot HR
-                with st.spinner("Genero forest plot degli HR…"):
-                    fig_forest = go.Figure()
-                    ylabels = hr_tbl.index.tolist()[::-1]
-                    HR = hr_tbl["HR"].values[::-1]
-                    lo = hr_tbl["CI 2.5%"].values[::-1]
-                    hi = hr_tbl["CI 97.5%"].values[::-1]
-                    fig_forest.add_trace(go.Scatter(
-                        x=HR, y=ylabels, mode="markers", name="HR", marker=dict(size=10)
-                    ))
-                    # barre di errore
-                    fig_forest.add_trace(go.Scatter(
-                        x=np.ravel(np.column_stack([lo, hi])), 
-                        y=np.repeat(ylabels, 2),
-                        mode="lines", showlegend=False
-                    ))
-                    fig_forest.add_vline(x=1.0, line=dict(dash="dash"))
-                    fig_forest.update_layout(title="Forest plot — Hazard Ratio (IC95%)",
-                                             xaxis_title="HR", yaxis_title="")
-                    st.plotly_chart(fig_forest, use_container_width=True)
-                st.caption("**Forest plot**: visualizza HR e IC95% per ogni covariata; la linea verticale a 1 indica **nessun effetto**.")
-
-                # Test di PH (Schoenfeld)
-                st.markdown("### Verifica assunzione di proporzionalità degli hazard")
-                with st.spinner("Eseguo test sui residui di Schoenfeld…"):
-                    ph_test = proportional_hazard_test(cph, df_cox, time_transform="rank")
-                    ph_tbl = ph_test.summary.copy()
-                    ph_tbl = ph_tbl[["test_statistic","p"]].rename(columns={"p":"p-value"}).round(4)
-                    st.dataframe(ph_tbl, use_container_width=True)
-                st.caption(
-                    "L’assunzione di **hazard proporzionali** richiede che l’effetto delle covariate sia **costante nel tempo**. "
-                    "p-value **piccolo** suggerisce violazione per la covariata corrispondente (considerare termini time-varying, stratificazione o AFT)."
-                )
-            except Exception as e:
-                st.error(f"Impossibile stimare Cox: {e}")
-
-    # =========================
-    #   AFT (Weibull) opzionale
-    # =========================
-    st.markdown("## Modello AFT (Weibull) — Opzionale")
-    aft_on = st.checkbox("Stima AFT (Weibull) con le stesse covariate", value=False)
-    if aft_on:
-        if len(covariates)==0 and group_var=="— Nessuna —":
-            st.info("Selezioni almeno una covariata o una stratificazione per stimare l’AFT.")
-        else:
-            with st.spinner("Stimo Weibull AFT…"):
-                try:
-                    df_aft = pd.DataFrame({"T": T, "E": E})
-                    covs = list(covariates)
-                    if group_var != "— Nessuna —":
-                        covs = [group_var] + covs
-                    if len(covs)>0:
-                        X = _design_matrix(df.loc[mask], covs)
-                        df_aft = pd.concat([df_aft, X], axis=1)
-                    aft = WeibullAFTFitter()
-                    aft.fit(df_aft, duration_col="T", event_col="E")
-                    aft_sum = aft.summary.copy()
-                    # Time Ratio = exp(+coef) nella parametrizzazione di lifelines (sui log-tempi)
-                    tr_tbl = aft_sum[["coef", "ci_lower_", "ci_upper_", "p"]].rename(
-                        columns={"coef":"log(TR)", "ci_lower_":"CI 2.5% (log)", "ci_upper_":"CI 97.5% (log)", "p":"p-value"}
-                    ).round(4)
-                    tr_tbl["TR"] = np.exp(tr_tbl["log(TR)"])
-                    tr_tbl["CI 2.5%"] = np.exp(tr_tbl["CI 2.5% (log)"])
-                    tr_tbl["CI 97.5%"] = np.exp(tr_tbl["CI 97.5% (log)"])
-                    st.dataframe(tr_tbl[["TR","CI 2.5%","CI 97.5%","p-value"]], use_container_width=True)
-                    st.caption(
-                        "**AFT (Accelerated Failure Time)**: **TR > 1** ⇒ tempi di sopravvivenza **più lunghi** (evento ritardato); "
-                        "**TR < 1** ⇒ tempi **più brevi**. Modello utile quando l’assunzione PH non è soddisfatta."
+                with st.expander("ℹ️ Come interpretare il **modello di Cox**", expanded=False):
+                    st.markdown(
+                        "- **HR (Hazard Ratio)**: fattore moltiplicativo sul **rischio istantaneo**. HR>1 aumenta il rischio, HR<1 lo riduce.  \n"
+                        "- **Intervallo di confidenza**: se il CI di HR **non** include 1, l’effetto è statisticamente significativo (al livello α prescelto).  \n"
+                        "- **Concordance index**: probabilità che, per una coppia, il soggetto con rischio stimato maggiore fallisca prima (≈ potere discriminante)."
                     )
+
+                # Diagnostica PH (Schoenfeld)
+                st.markdown("#### Verifica dell’assunzione di **hazard proporzionali**")
+                try:
+                    zph = proportional_hazard_test(cph, X, time_transform="rank")
+                    ztab = zph.summary.copy()
+                    ztab = ztab.rename(columns={"test_statistic": "χ²", "p": "p"})
+                    ztab = ztab[["χ²", "p"]].round(4)
+                    st.dataframe(ztab, use_container_width=True)
+                    st.caption("p-value piccoli indicano **violazione** dell’assunzione PH per la covariata corrispondente (test su residui di Schoenfeld).")
                 except Exception as e:
-                    st.error(f"Impossibile stimare AFT: {e}")
+                    st.caption(f"Test di PH non disponibile: {e}")
 
-# =========================
-#   Export nel Results Summary
-# =========================
-st.markdown("### Esporta nel Results Summary")
-if st.button("➕ Aggiungi analisi di sopravvivenza al Results Summary"):
-    with st.spinner("Salvo i risultati nel Results Summary…"):
-        if "report_items" not in st.session_state:
-            st.session_state.report_items = []
-        item = {
-            "type":"survival_analysis",
-            "title": f"Sopravvivenza — tempo: {time_col}, evento: {event_col} (= {event_value})",
-            "content": {
-                "N": int(n_all), "events": int(n_events), "censored": int(n_cens),
-                "km_summary": km_tbl.to_dict(orient="records") if 'km_tbl' in locals() else None,
-                "risk_table": risk_tbl.to_dict(orient="records") if 'risk_tbl' in locals() else None
-            }
-        }
-        if _HAS_LIFELINES:
-            # Aggiungi Cox/AFT se presenti
-            if 'hr_tbl' in locals():
-                item["content"]["cox_hr"] = hr_tbl.reset_index().rename(columns={"index":"term"}).to_dict(orient="records")
-            if 'ph_tbl' in locals():
-                item["content"]["ph_test"] = ph_tbl.reset_index().rename(columns={"index":"term"}).to_dict(orient="records")
-            if 'tr_tbl' in locals():
-                item["content"]["aft_tr"] = tr_tbl[["TR","CI 2.5%","CI 97.5%","p-value"]].reset_index().rename(columns={"index":"term"}).to_dict(orient="records")
-        st.session_state.report_items.append(item)
-    st.success("Analisi di sopravvivenza aggiunta al Results Summary.")
+                # Grafici di sopravvivenza predetta (due profili semplici)
+                with st.expander("📈 Sopravvivenza predetta per profili di covariate (facoltativo)"):
+                    # Costruiamo due profili: media e media+1sd (per numeriche). Per dummies: 0/1
+                    base = X.drop(columns=[time_col, event_col]).median(numeric_only=True)
+                    prof1 = base.copy()
+                    prof2 = base.copy()
+                    for c in base.index:
+                        if c in X.columns and pd.api.types.is_numeric_dtype(X[c]):
+                            prof2[c] = base[c] + X[c].std(ddof=1)
+                    try:
+                        sf1 = cph.predict_survival_function(prof1.to_frame().T)
+                        sf2 = cph.predict_survival_function(prof2.to_frame().T)
+                        figp = go.Figure()
+                        figp.add_trace(go.Scatter(x=sf1.index.values, y=sf1.values.flatten(),
+                                                  mode="lines", name="Profilo 1 (baseline)",
+                                                  line=dict(width=3)))
+                        figp.add_trace(go.Scatter(x=sf2.index.values, y=sf2.values.flatten(),
+                                                  mode="lines", name="Profilo 2 (+1 SD numeriche)",
+                                                  line=dict(width=3, dash="dash")))
+                        figp.update_layout(template="simple_white", height=420,
+                                           title="Sopravvivenza predetta (Cox)",
+                                           xaxis_title=f"Tempo ({time_col})", yaxis_title="S(t)")
+                        st.plotly_chart(figp, use_container_width=True)
+                    except Exception:
+                        st.info("Impossibile calcolare le curve predette con il profilo scelto.")
 
-# =========================
-#   Spiegazione didattica
-# =========================
-with st.expander("ℹ️ Spiegazione completa (lettura risultati)", expanded=False):
-    st.markdown("""
-**Kaplan–Meier (KM)**  
-- Stima la **probabilità di sopravvivenza** oltre il tempo *t*, tenendo conto delle **censure** (soggetti che escono senza evento).  
-- La **mediana di sopravvivenza** è il tempo in cui S(t)=0.5 (se raggiunta).  
-- **Numero a rischio**: quanti sono ancora osservati appena prima di *t*.  
-- **Confronto tra curve**: il **log-rank test** verifica se le curve sono uguali (ipotesi nulla). p-value piccolo → differenza tra gruppi.
+            except Exception as e:
+                st.error(f"Errore nella stima del modello di Cox: {e}")
+    else:
+        st.info("Selezionare almeno **una** covariata per stimare il modello di Cox.")
 
-**Hazard cumulativa (Nelson–Aalen)**  
-- L’**hazard** è il rischio istantaneo di evento. L’integrale nel tempo produce l’**hazard cumulativa** \(H(t)\), con relazione \(S(t)=e^{-H(t)}\).  
-- Curve con pendenza maggiore indicano rischio più elevato.
+# ──────────────────────────────────────────────────────────────────────────────
+# Esportazione tabelle principali
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown("### 4) Esporta risultati")
+if 'tbl' in locals() and isinstance(tbl, pd.DataFrame):
+    csv_km = tbl.to_csv(index=False).encode("utf-8")
+    st.download_button("Scarica statistiche KM (CSV)", data=csv_km,
+                       file_name="km_summary.csv", mime="text/csv", key=k("dl_km"))
 
-**Cox Proportional Hazards (PH)**  
-- Modello semiparametrico: \\(h(t\\mid X)=h_0(t)\\exp(\\beta^\\top X)\\).  
-- **Hazard Ratio (HR)** = \\(e^{\\beta}\\): HR>1 ⇒ rischio maggiore; HR<1 ⇒ rischio minore.  
-- **c-index**: capacità discriminativa (0.5 casuale; 1 perfetta).  
-- **Assunzione PH**: l’effetto delle covariate è costante nel tempo. Si verifica con test sui **residui di Schoenfeld**: p-value piccolo → possibile violazione (considerare stratificazione, termini time-varying o passare ad **AFT**).
-
-**AFT (Weibull)**  
-- Modello sui **tempi**: \\(\\log T = \\alpha + \\gamma^\\top X + \\sigma W\\).  
-- **Time Ratio (TR)=e^{\\gamma}**: TR>1 ⇒ tempi più **lunghi** (evento ritardato); TR<1 ⇒ tempi **più brevi**.  
-- Utile quando l’ipotesi PH non è adeguata.
-
-**Buone pratiche**  
-- Controlli sempre il **numero a rischio**: stime con pochissimi soggetti sono instabili.  
-- Valuti PH: in caso di violazioni, consideri **stratificazione** o **covariate time-varying**.  
-- Riporti **mediana** e **S(t)** a tempi clinicamente rilevanti con **IC** quando opportuno.
-""")
+# ──────────────────────────────────────────────────────────────────────────────
+# Navigazione
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown("---")
+nav1, nav2 = st.columns(2)
+with nav1:
+    if st.button("⬅️ Torna: Agreement", use_container_width=True, key=k("go_prev")):
+        try:
+            st.switch_page("pages/10_📏_Agreement.py")
+        except Exception:
+            pass
+with nav2:
+    if st.button("➡️ Vai: Longitudinale — Misure ripetute", use_container_width=True, key=k("go_next")):
+        for target in [
+            "pages/12_📈_Longitudinale_Misure_Ripetute.py",
+            "pages/12_📈_Longitudinale_Misure_Ripetute (1).py",
+            "pages/12_📈_Longitudinale_Misure_Ripetute....py"
+        ]:
+            try:
+                st.switch_page(target)
+                break
+            except Exception:
+                continue
