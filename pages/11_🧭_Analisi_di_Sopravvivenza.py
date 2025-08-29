@@ -201,7 +201,6 @@ with left:
     show_censors = st.checkbox("Mostra tick di censura", value=False, key=k("km_ticks"))
     group_palette = px.colors.qualitative.D3 if px is not None else None
 
-    # Disegno
     if go is not None:
         fig = go.Figure()
         groups_iter = [("Tutti", work)] if group_col is None else list(work.groupby("group", dropna=False))
@@ -309,13 +308,11 @@ with right:
 # Numeri a rischio (tabella) — versione robusta senza errori di default
 with st.expander("📊 Numeri a rischio (seleziona tempi)", expanded=False):
     tmin = float(work["time"].min()); tmax = float(work["time"].max())
-    # Costruiamo un set di opzioni robusto (linspace + quantili), arrotondato a 2 decimali
     def r2(x): return float(np.round(x, 2))
     linpts = [r2(x) for x in np.linspace(tmin, tmax, 10)]
     qpts   = [r2(x) for x in np.quantile(work["time"], [0, 0.25, 0.5, 0.75, 1.0])]
     options = sorted(set(linpts + qpts))
 
-    # Default ancorato alle options per evitare StreamlitAPIException
     def snap_to_options(vals: list[float], opts: list[float]) -> list[float]:
         if not opts: return []
         snapped = []
@@ -355,13 +352,12 @@ if not _has_lifelines:
     st.info("Il modello di Cox richiede **lifelines**. Installare `lifelines` per abilitare la sezione seguente.")
 else:
     covar_opts = [c for c in df.columns if c not in {time_col, event_col}]
-    colA, colB, colC = st.columns([1.6, 1.0, 1.0])
+    colA, colB = st.columns([1.6, 1.4])
     with colA:
         covars = st.multiselect("Covariate (selezionare una o più)", options=covar_opts, key=k("covars"))
     with colB:
         zscore = st.checkbox("Standardizza variabili numeriche (z-score)", value=False, key=k("z"))
-    with colC:
-        ties = st.selectbox("Gestione dei tie", options=["efron", "breslow", "exact"], index=0, key=k("ties"))
+        st.caption("Ties gestiti automaticamente con **Efron** (impostazione di default in lifelines).")
 
     if covars:
         X = df[[time_col, event_col] + covars].copy()
@@ -383,7 +379,8 @@ else:
         else:
             cph = CoxPHFitter()
             try:
-                cph.fit(X, duration_col=time_col, event_col=event_col, show_progress=False, ties=ties)
+                # ⬇️ NESSUN argomento 'ties' qui
+                cph.fit(X, duration_col=time_col, event_col=event_col, show_progress=False)
                 st.markdown("**Tabella dei coefficienti (scala HR)**")
                 summ = cph.summary.copy()
                 cols = {
@@ -414,7 +411,7 @@ else:
                         "- **HR (Hazard Ratio)**: fattore moltiplicativo sul **rischio istantaneo**. HR>1 aumenta il rischio, HR<1 lo riduce.  \n"
                         "- **Intervallo di confidenza**: se il CI di HR **non** include 1, l’effetto è statisticamente significativo.  \n"
                         "- **Concordance index**: probabilità che l’ordine dei tempi osservati sia coerente con l’ordine dei rischi stimati (discriminazione).  \n"
-                        "- **Ties**: *efron* consigliato in generale; *breslow* è più veloce; *exact* per molti legami (ma costoso)."
+                        "- **Ties**: gestiti con il metodo di **Efron** (default)."
                     )
 
                 # Diagnostica PH (Schoenfeld)
