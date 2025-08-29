@@ -1,31 +1,44 @@
 # -*- coding: utf-8 -*-
-# pages/11_🧭_Analisi_di_Sopravvivenza.py
+# pages/12_📈_Longitudinale_Misure_Ripetute.py
 from __future__ import annotations
 
-import math
 import itertools
-import streamlit as st
+import math
 import numpy as np
 import pandas as pd
+import streamlit as st
 
-# Plot
+# Plotly
 try:
-    import plotly.graph_objects as go
     import plotly.express as px
+    import plotly.graph_objects as go
 except Exception:
-    go = None
     px = None
+    go = None
 
-# Lifelines per KM, log-rank, Cox (opzionale: il modulo funziona in fallback)
+# Stats: statsmodels, scipy, pingouin (opzionali)
 try:
-    from lifelines import KaplanMeierFitter, CoxPHFitter
-    from lifelines.statistics import logrank_test, multivariate_logrank_test, proportional_hazard_test
-    _has_lifelines = True
+    import statsmodels.api as sm
+    import statsmodels.formula.api as smf
+    from statsmodels.stats.anova import AnovaRM
+    _has_sm = True
 except Exception:
-    _has_lifelines = False
+    _has_sm = False
+
+try:
+    from scipy import stats as sps
+    _has_scipy = True
+except Exception:
+    _has_scipy = False
+
+try:
+    import pingouin as pg  # sfericità, pairwise, epsilon GG/HF, ecc.
+    _has_pg = True
+except Exception:
+    _has_pg = False
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Data store centralizzato (come negli altri moduli)
+# DATA STORE (uniforme agli altri moduli)
 # ──────────────────────────────────────────────────────────────────────────────
 try:
     from data_store import ensure_initialized, get_active, stamp_meta
@@ -56,108 +69,64 @@ except Exception:
         with c3: st.metric("Ultimo aggiornamento", when)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Config pagina + nav
+# CONFIG & NAV
 # ──────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="🧭 Analisi di Sopravvivenza", layout="wide")
+st.set_page_config(page_title="📈 Longitudinale — Misure ripetute", layout="wide")
 try:
     from nav import sidebar
     sidebar()
 except Exception:
     pass
 
-KEY = "surv"
+KEY = "rm"
 def k(name: str) -> str:
     return f"{KEY}_{name}"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Utility numeriche e di sintesi
+# UTILS
 # ──────────────────────────────────────────────────────────────────────────────
 def fmt_p(p: float | None) -> str:
-    if p is None or p != p:
-        return "—"
-    if p < 1e-4:
-        return "< 1e-4"
+    if p is None or p != p: return "—"
+    if p < 1e-4: return "< 1e-4"
     return f"{p:.4f}"
 
-def interpret_p(p: float | None, alpha: float = 0.05) -> str:
-    if p is None or p != p:
-        return "non conclusivo"
-    return "statisticamente significativo" if p < alpha else "non significativo"
+def holm_correction(pvals: list[float]) -> list[float]:
+    # Holm–Bonferroni
+    m = len(pvals)
+    order = np.argsort(pvals)
+    adj = np.empty(m)
+    for rank, idx in enumerate(order):
+        adj[idx] = min((m - rank) * pvals[idx], 1.0)
+    return adj.tolist()
+
+def infer_time_order(levels: list[str]) -> list[str]:
+    # prova ad ordinare estraendo eventuali numeri, altrimenti alfabetico
+    def keyf(s):
+        import re
+        nums = re.findall(r"[-+]?\d*\.?\d+", str(s))
+        return float(nums[0]) if nums else None
+    nums = [keyf(x) for x in levels]
+    if all(v is not None for v in nums):
+        return [x for _, x in sorted(zip(nums, levels))]
+    return sorted(levels)
+
+def to_long_from_wide(df: pd.DataFrame, id_col: str, time_cols: list[str],
+                      value_name: str = "y", time_name: str = "time",
+                      between_col: str | None = None) -> pd.DataFrame:
+    id_vars = [id_col] + ([between_col] if between_col else [])
+    long_df = df.melt(id_vars=id_vars, value_vars=time_cols,
+                      var_name=time_name, value_name=value_name)
+    # ordina livelli del tempo
+    long_df[time_name] = long_df[time_name].astype(str)
+    order = infer_time_order(sorted(long_df[time_name].unique()))
+    long_df[time_name] = pd.Categorical(long_df[time_name], categories=order, ordered=True)
+    return long_df
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Utility: KM fallback (se lifelines assente), log-rank 2 gruppi, risk table
+# HEADER
 # ──────────────────────────────────────────────────────────────────────────────
-def _km_curve_fallback(time: np.ndarray, event: np.ndarray):
-    """Restituisce (t, S(t)) step-wise senza CI (fallback semplice)."""
-    df = pd.DataFrame({"t": time, "e": event}).sort_values("t")
-    df = df[df["t"].notna()]
-    t_unique = np.sort(df.loc[df["e"] == 1, "t"].unique())
-    if t_unique.size == 0:
-        tmax = float(df["t"].max() if df["t"].notna().any() else 1.0)
-        return np.array([0.0, tmax]), np.array([1.0, 1.0])
-    s = 1.0
-    t_list = [0.0]; S_list = [1.0]
-    for t in t_unique:
-        at_risk = ((df["t"] >= t)).sum()
-        d = ((df["t"] == t) & (df["e"] == 1)).sum()
-        if at_risk > 0:
-            s *= (1.0 - d / at_risk)
-        t_list.append(float(t)); S_list.append(float(s))
-    t_list.append(float(df["t"].max()))
-    S_list.append(float(S_list[-1]))
-    return np.array(t_list, dtype=float), np.array(S_list, dtype=float)
-
-def _median_survival_from_km(t: np.ndarray, S: np.ndarray) -> float | None:
-    if len(t) == 0: return None
-    below = np.where(S <= 0.5)[0]
-    if len(below) == 0:
-        return None
-    i = below[0]
-    return float(t[i])
-
-def _logrank_two_groups_fallback(t1, e1, t0, e0):
-    """Log-rank per 2 gruppi (statistica ~ χ²(1))."""
-    times = np.sort(np.unique(np.concatenate([t1[e1==1], t0[e0==1]])))
-    Z = 0.0; V = 0.0
-    for t in times:
-        n1 = ((t1 >= t)).sum(); n0 = ((t0 >= t)).sum(); n = n1 + n0
-        d1 = ((t1 == t) & (e1 == 1)).sum()
-        d0 = ((t0 == t) & (e0 == 1)).sum()
-        d = d1 + d0
-        if n > 1 and n1 > 0 and n0 > 0:
-            exp1 = d * (n1 / n)
-            Z += (d1 - exp1)
-            V += (n1 * n0 * d * (n - d)) / (n**2 * (n - 1)) if (n - 1) > 0 else 0.0
-    chi2 = (Z**2) / V if V > 0 else np.nan
-    try:
-        from scipy.stats import chi2 as chi2dist
-        p = float(chi2dist.sf(chi2, df=1))
-    except Exception:
-        p = math.exp(-chi2 / 2.0) if chi2 == chi2 else np.nan
-    return float(chi2), float(p)
-
-def _numbers_at_risk(df_: pd.DataFrame, time_col: str, event_col: str, group_col: str | None, cutpoints: list[float]):
-    """
-    Tabella 'numeri a rischio' ai cutpoints richiesti.
-    ATTENZIONE: df_ deve contenere la colonna group_col se group_col è non-None.
-    """
-    out = []
-    if group_col is None:
-        groups = [("Tutti", df_)]
-    else:
-        # group_col deve ESISTERE in df_ → in questo modulo vale "group"
-        groups = [(str(g), gdf) for g, gdf in df_.groupby(group_col, dropna=False)]
-    for gname, gdf in groups:
-        t = pd.to_numeric(gdf[time_col], errors="coerce")
-        at_risk = [(t >= cp).sum() for cp in cutpoints]
-        out.append(pd.Series(at_risk, index=cutpoints, name=gname))
-    return pd.DataFrame(out).set_index(pd.Index([g for g, _ in groups]))
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Header
-# ──────────────────────────────────────────────────────────────────────────────
-st.title("🧭 Analisi di Sopravvivenza")
-st.caption("Curve di Kaplan–Meier, test di log-rank e modello di Cox PH con diagnostica. Interfaccia coerente e guidata.")
+st.title("📈 Longitudinale — Misure ripetute")
+st.caption("ANOVA per misure ripetute, alternativa non parametrica (Friedman) e modello lineare a effetti misti (LMM). Strumenti per passare da **wide** a **long** e guida all’interpretazione.")
 
 ensure_initialized()
 df = get_active(required=True)
@@ -167,397 +136,436 @@ if df is None or df.empty:
     st.stop()
 
 all_cols = list(df.columns)
-num_cols = [c for c in all_cols if pd.api.types.is_numeric_dtype(df[c])]
+num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+cat_cols = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])]
 
 # ──────────────────────────────────────────────────────────────────────────────
-# STEP 1 — Selezione variabili
+# STEP 1 — FORMATO DATI (Long vs Wide) + TRASFORMAZIONE
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("### 1) Seleziona le variabili")
-c1, c2, c3 = st.columns([1.4, 1.2, 1.4])
+st.markdown("### 1) Formato dei dati")
+c1, c2 = st.columns([1.2, 1.8])
 with c1:
-    time_col = st.selectbox("Tempo di follow-up", options=num_cols, key=k("time"))
+    data_format = st.radio("I dati sono già in **long** o sono in **wide**?", ["Long", "Wide"], horizontal=True, key=k("format"))
 with c2:
-    event_col = st.selectbox("Evento (0/1 o categoriale)", options=all_cols, key=k("event"))
-with c3:
-    group_col = st.selectbox("Gruppo (opzionale)", options=["— nessuno —"] + all_cols, key=k("group"))
-    group_col = None if group_col == "— nessuno —" else group_col
-
-# Preparazione evento binario
-y_raw = df[event_col]
-if pd.api.types.is_numeric_dtype(y_raw) and set(pd.unique(y_raw.dropna())) <= {0, 1}:
-    event_label = 1
-    event = (y_raw == 1).astype(int)
-    st.caption("Evento interpretato come binario {0,1} con '1' = **evento**.")
-else:
-    levels = sorted(y_raw.dropna().astype(str).unique().tolist())
-    event_label = st.selectbox("Qual è il valore che rappresenta **evento** (vs censura)?",
-                               options=levels, key=k("event_label"))
-    event = (y_raw.astype(str) == event_label).astype(int)
-
-time = pd.to_numeric(df[time_col], errors="coerce")
-if (time < 0).any():
-    st.warning("Sono presenti tempi negativi: verranno ignorati nelle analisi.")
-    mask_nonneg = time >= 0
-else:
-    mask_nonneg = np.ones(len(time), dtype=bool)
-
-work = pd.DataFrame({"time": time, "event": event})
-if group_col is not None:
-    work["group"] = df[group_col].astype(str)
-work = work[mask_nonneg].dropna(subset=["time", "event"])
-
-if work.empty:
-    st.error("Dopo la pulizia (NA/tempi negativi) non restano osservazioni utilizzabili.")
-    st.stop()
-
-# ──────────────────────────────────────────────────────────────────────────────
-# STEP 2 — Curve di Kaplan–Meier e test di log-rank
-# ──────────────────────────────────────────────────────────────────────────────
-st.markdown("### 2) Curve di Kaplan–Meier e test di log-rank")
-left, right = st.columns([1.6, 1.4])
-
-alpha = st.select_slider("Soglia di significatività (α)", options=[0.01, 0.05, 0.10], value=0.05, key=k("alpha"))
-
-with left:
-    show_ci = st.checkbox("Mostra intervalli di confidenza 95%", value=True, key=k("km_ci"))
-    show_censors = st.checkbox("Mostra tick di censura", value=False, key=k("km_ticks"))
-    group_palette = px.colors.qualitative.D3 if px is not None else None
-
-    if go is not None:
-        fig = go.Figure()
-        groups_iter = [("Tutti", work)] if group_col is None else list(work.groupby("group", dropna=False))
-        for idx, (gname, gdf) in enumerate(groups_iter):
-            t = gdf["time"].to_numpy(float)
-            e = gdf["event"].to_numpy(int)
-            color = (group_palette[idx % len(group_palette)] if group_palette else None)
-
-            if _has_lifelines:
-                km = KaplanMeierFitter()
-                km.fit(t, e, label=str(gname))
-                x = km.survival_function_.index.values.astype(float)
-                y = km.survival_function_[str(gname)].values.astype(float)
-                fig.add_trace(go.Scatter(x=x, y=y, mode="lines", line_shape="hv",
-                                         line=dict(width=3, color=color),
-                                         name=str(gname)))
-                if show_ci:
-                    ci = km.confidence_interval_
-                    low = ci.iloc[:, 0].values.astype(float); high = ci.iloc[:, 1].values.astype(float)
-                    fig.add_trace(go.Scatter(x=x, y=low, line=dict(width=0), showlegend=False,
-                                             hoverinfo="skip", name=None))
-                    fig.add_trace(go.Scatter(x=x, y=high, fill="tonexty",
-                                             fillcolor="rgba(127,127,127,0.15)",
-                                             line=dict(width=0), showlegend=False, hoverinfo="skip", name=None))
-                if show_censors:
-                    cens_t = gdf.loc[gdf["event"] == 0, "time"].values
-                    fig.add_trace(go.Scatter(x=cens_t, y=km.predict(cens_t), mode="markers",
-                                             marker=dict(symbol="line-ns", size=8, color=color),
-                                             name=f"Censura {gname}", showlegend=False, hoverinfo="skip"))
-            else:
-                x, y = _km_curve_fallback(t, e)
-                fig.add_trace(go.Scatter(x=x, y=y, mode="lines", line_shape="hv",
-                                         line=dict(width=3, color=color),
-                                         name=str(gname)))
-        fig.update_layout(template="simple_white", height=460,
-                          title="Curve di sopravvivenza (Kaplan–Meier)",
-                          xaxis_title=f"Tempo ({time_col})", yaxis_title="S(t)")
-        fig.update_yaxes(range=[0, 1], showline=True, linewidth=2, linecolor="black")
-        fig.update_xaxes(showline=True, linewidth=2, linecolor="black")
-        st.plotly_chart(fig, use_container_width=True)
-
-with right:
-    # Mediane e log-rank
-    if _has_lifelines:
-        rows = []
-        if group_col is None:
-            km = KaplanMeierFitter().fit(work["time"], work["event"], label="Tutti")
-            med = km.median_survival_time_
-            low, high = (np.nan, np.nan)
-            try:
-                low, high = km.confidence_interval_.median().values
-            except Exception:
-                pass
-            rows.append(["Tutti", med, low, high, int(work["event"].sum()), int(len(work))])
-        else:
-            for gname, gdf in work.groupby("group", dropna=False):
-                km = KaplanMeierFitter().fit(gdf["time"], gdf["event"], label=str(gname))
-                med = km.median_survival_time_
-                low = high = np.nan
-                rows.append([str(gname), med, low, high, int(gdf["event"].sum()), int(len(gdf))])
-        tbl = pd.DataFrame(rows, columns=["Gruppo", "Mediana", "CI 2.5%", "CI 97.5%", "Eventi", "N"])
-    else:
-        rows = []
-        if group_col is None:
-            x, y = _km_curve_fallback(work["time"].to_numpy(float), work["event"].to_numpy(int))
-            rows.append(["Tutti", _median_survival_from_km(x, y), np.nan, np.nan, int(work["event"].sum()), int(len(work))])
-        else:
-            for gname, gdf in work.groupby("group", dropna=False):
-                x, y = _km_curve_fallback(gdf["time"].to_numpy(float), gdf["event"].to_numpy(int))
-                rows.append([str(gname), _median_survival_from_km(x, y), np.nan, np.nan, int(gdf["event"].sum()), int(len(gdf))])
-        tbl = pd.DataFrame(rows, columns=["Gruppo", "Mediana", "CI 2.5%", "CI 97.5%", "Eventi", "N"])
-
-    st.markdown("**Statistiche riassuntive**")
-    st.dataframe(tbl, use_container_width=True)
-
-    # Log-rank (e memorizzo p-value per interpretazione)
-    p_logrank = None
-    if group_col is not None:
-        levels = list(work["group"].astype(str).unique())
-        if len(levels) == 2:
-            g0 = work[work["group"] == levels[0]]
-            g1 = work[work["group"] == levels[1]]
-            if _has_lifelines:
-                res = logrank_test(g0["time"], g1["time"], g0["event"], g1["event"])
-                p_logrank = float(res.p_value)
-                st.metric("Log-rank (2 gruppi) — p-value", fmt_p(p_logrank))
-            else:
-                _, p_logrank = _logrank_two_groups_fallback(g1["time"].values, g1["event"].values,
-                                                            g0["time"].values, g0["event"].values)
-                st.metric("Log-rank (2 gruppi) — p-value", fmt_p(p_logrank))
-        elif len(levels) > 2 and _has_lifelines:
-            res = multivariate_logrank_test(work["time"], work["group"], work["event"])
-            p_logrank = float(res.p_value)
-            st.metric("Log-rank (k gruppi) — p-value", fmt_p(p_logrank))
-            with st.expander("Confronti **pairwise** (Holm-Bonferroni)", expanded=False):
-                pairs = list(itertools.combinations(levels, 2))
-                rows = []
-                for a, b in pairs:
-                    A = work[work["group"] == a]; B = work[work["group"] == b]
-                    p = logrank_test(A["time"], B["time"], A["event"], B["event"]).p_value
-                    rows.append([a, b, p])
-                dfp = pd.DataFrame(rows, columns=["A", "B", "p"])
-                dfp = dfp.sort_values("p").reset_index(drop=True)
-                m = len(dfp)
-                dfp["p_Holm"] = [min((m - i) * p, 1.0) for i, p in enumerate(dfp["p"])]
-                st.dataframe(dfp, use_container_width=True)
-
-# Numeri a rischio (tabella) — versione robusta e senza KeyError
-with st.expander("📊 Numeri a rischio (seleziona tempi)", expanded=False):
-    tmin = float(work["time"].min()); tmax = float(work["time"].max())
-    def r2(x): return float(np.round(x, 2))
-    linpts = [r2(x) for x in np.linspace(tmin, tmax, 10)]
-    qpts   = [r2(x) for x in np.quantile(work["time"], [0, 0.25, 0.5, 0.75, 1.0])]
-    options = sorted(set(linpts + qpts))
-
-    def snap_to_options(vals: list[float], opts: list[float]) -> list[float]:
-        if not opts: return []
-        snapped = []
-        for v in vals:
-            if v in opts:
-                snapped.append(v)
-            else:
-                nearest = min(opts, key=lambda o: abs(o - v))
-                if nearest not in snapped:
-                    snapped.append(nearest)
-        return snapped or [opts[0]]
-
-    default_opts = snap_to_options(qpts, options)
-
-    cutpoints = st.multiselect("Tempi in cui mostrare N a rischio",
-                               options=options,
-                               default=default_opts, key=k("risk_pts"))
-    if cutpoints:
-        # ⚠️ qui passiamo 'group' se esiste, altrimenti None → evita KeyError
-        group_key = "group" if ("group" in work.columns) else None
-        risk = _numbers_at_risk(work, "time", "event", group_key, cutpoints)
-        st.dataframe(risk.astype(int), use_container_width=True)
-        st.caption("Valori mostrati: **numero di soggetti ancora a rischio** a ciascun tempo selezionato (censurati ed eventi pregressi esclusi).")
-
-with st.expander("ℹ️ Come leggere KM, log-rank e N a rischio", expanded=False):
-    st.markdown(
-        "- **S(t)**: probabilità di **non** aver avuto l’evento entro t (linea a gradini). Intervalli di confidenza (se mostrati) quantificano l’incertezza.  \n"
-        "- **Mediana di sopravvivenza**: tempo per cui S(t)=0.5; se la curva resta >0.5 non è stimabile.  \n"
-        "- **Tick di censura**: istanti di uscita dall’osservazione; non rappresentano eventi.  \n"
-        "- **Log-rank**: p-value piccolo ⇒ differenza globale tra le curve (assume **hazard proporzionali**).  \n"
-        "- **Numeri a rischio**: aiutano a valutare l’**affidabilità** della coda delle curve; valori molto bassi implicano stime **instabili**."
+    st.caption(
+        "- **Long**: una riga per soggetto × tempo (colonne: ID, Tempo, Misura).  \n"
+        "- **Wide**: una riga per soggetto con **più colonne** (Misura_T1, Misura_T2, …).  \n"
+        "Se è in wide, usi il pannello seguente per convertirlo in long."
     )
 
-# Sintesi automatica risultati KM/log-rank
-with st.expander("📝 Interpretazione automatica — KM & log-rank", expanded=True):
-    bullets = []
-    if 'tbl' in locals() and isinstance(tbl, pd.DataFrame) and not tbl.empty:
-        try:
-            order = tbl.sort_values("Mediana").reset_index(drop=True)
-            med_txt = " • ".join([f"{row['Gruppo']}: mediana={row['Mediana']:.2f}" if pd.notnull(row['Mediana']) else f"{row['Gruppo']}: mediana n/d"
-                                  for _, row in order.iterrows()])
-            bullets.append(f"**Mediane** (se stimabili): {med_txt}.")
-        except Exception:
-            pass
-        try:
-            evt_txt = " • ".join([f"{row['Gruppo']}: eventi={int(row['Eventi'])}/N={int(row['N'])}" for _, row in tbl.iterrows()])
-            bullets.append(f"**Eventi/N** per gruppo: {evt_txt}.")
-        except Exception:
-            pass
-    if group_col is not None:
-        bullets.append(f"**Log-rank**: p = {fmt_p(p_logrank)} ⇒ {interpret_p(p_logrank, alpha)} (α = {alpha:.2f}).")
-    if 'risk' in locals() and isinstance(risk, pd.DataFrame):
-        low_n = (risk.min(axis=1) < 10).any()
-        if low_n:
-            bullets.append("Nella coda temporale alcuni gruppi hanno **N a rischio < 10**: interpretare con cautela le differenze oltre tali tempi.")
-    if not bullets:
-        bullets.append("Nessuna sintesi disponibile (fornire gruppi o risultati adeguati).")
-    st.markdown("\n\n".join([f"- {b}" for b in bullets]))
-
-# ──────────────────────────────────────────────────────────────────────────────
-# STEP 3 — Modello di Cox PH
-# ──────────────────────────────────────────────────────────────────────────────
-st.markdown("### 3) Modello di Cox (hazard proporzionali)")
-if not _has_lifelines:
-    st.info("Il modello di Cox richiede **lifelines**. Installare `lifelines` per abilitare la sezione seguente.")
-else:
-    covar_opts = [c for c in df.columns if c not in {time_col, event_col}]
-    colA, colB = st.columns([1.6, 1.4])
-    with colA:
-        covars = st.multiselect("Covariate (selezionare una o più)", options=covar_opts, key=k("covars"))
-    with colB:
-        zscore = st.checkbox("Standardizza variabili numeriche (z-score)", value=False, key=k("z"))
-        st.caption("Ties gestiti automaticamente con **Efron** (impostazione di default in lifelines).")
-
-    if covars:
-        X = df[[time_col, event_col] + covars].copy()
-        X[event_col] = event
-        if zscore:
-            for c in covars:
-                if pd.api.types.is_numeric_dtype(X[c]):
-                    s = pd.to_numeric(X[c], errors="coerce")
-                    mu, sd = float(s.mean()), float(s.std(ddof=1))
-                    if sd and sd > 0:
-                        X.loc[:, c] = (s - mu) / sd
-        X = pd.get_dummies(X, columns=[c for c in covars if not pd.api.types.is_numeric_dtype(df[c])],
-                           drop_first=True)
-        X = X.dropna(subset=[time_col, event_col])
-        X = X[X[time_col] >= 0]
-
-        if X.empty or X[event_col].nunique() < 2:
-            st.error("Dati insufficienti per la stima del modello di Cox.")
+with st.expander("🛠️ Converti da **wide** a **long** (se necessario)", expanded=(data_format == "Wide")):
+    cA, cB = st.columns([1.2, 1.8])
+    with cA:
+        id_col = st.selectbox("ID soggetto", options=all_cols, key=k("id_w"))
+        between_col = st.selectbox("Fattore **between** (opzionale)", options=["— nessuno —"] + all_cols, key=k("bet_w"))
+        between_col = None if between_col == "— nessuno —" else between_col
+        time_cols = st.multiselect("Colonne delle **misure nel tempo** (wide)", options=[c for c in all_cols if c != id_col and c != between_col], key=k("time_w"))
+    with cB:
+        value_name = st.text_input("Nome colonna misura (es. y)", value="y", key=k("valname"))
+        time_name = st.text_input("Nome colonna tempo (es. time)", value="time", key=k("timename"))
+        if time_cols:
+            st.caption("Anteprima dei livelli tempo dedotti e del loro ordine.")
+            preview = infer_time_order([str(c) for c in time_cols])
+            st.code(", ".join(preview))
+    long_df = None
+    if st.button("↳ Crea dataset **long**", key=k("do_long")):
+        if not time_cols:
+            st.warning("Selezionare almeno una colonna di misura.")
         else:
-            cph = CoxPHFitter()
+            long_df = to_long_from_wide(df, id_col=id_col, time_cols=time_cols,
+                                        value_name=value_name, time_name=time_name, between_col=between_col)
+            st.session_state[k("long_df")] = long_df
+            st.success(f"Creato dataset long con colonne: **{id_col}**, **{time_name}**, **{value_name}**" + (f", **{between_col}**" if between_col else ""))
+
+# Costruzione dataset di lavoro in long
+if data_format == "Long":
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        id_long = st.selectbox("Colonna **ID**", options=all_cols, key=k("id_l"))
+    with c2:
+        time_long = st.selectbox("Colonna **Tempo**", options=[c for c in all_cols if c != id_long], key=k("time_l"))
+    with c3:
+        y_long = st.selectbox("Colonna **Misura** (continua)", options=[c for c in all_cols if c not in {id_long, time_long}], key=k("y_l"))
+    between_long = st.selectbox("Fattore **between** (opzionale)", options=["— nessuno —"] + [c for c in all_cols if c not in {id_long, time_long, y_long}], key=k("bet_l"))
+    between_long = None if between_long == "— nessuno —" else between_long
+    work = df[[id_long, time_long, y_long] + ([between_long] if between_long else [])].copy()
+    work.columns = ["id", "time", "y"] + (["between"] if between_long else [])
+else:
+    # prendi dall'expander se creato, altrimenti attesa
+    work = st.session_state.get(k("long_df"))
+    if work is None:
+        st.info("Creare il dataset **long** con il pannello sopra, poi procedere.")
+        st.stop()
+    # già con nomi id/time/y/(between)
+    if "id" not in work.columns or "time" not in work.columns or "y" not in work.columns:
+        st.error("Il dataset long deve contenere le colonne: id, time, y (e facoltativamente between).")
+        st.stop()
+
+# Pulizia base
+work = work.dropna(subset=["id", "time"])
+work["y"] = pd.to_numeric(work["y"], errors="coerce")
+work = work.dropna(subset=["y"])
+work["id"] = work["id"].astype(str)
+work["time"] = work["time"].astype(str)
+# Ordine dei livelli tempo (intelligente + personalizzabile)
+auto_order = infer_time_order(sorted(work["time"].unique()))
+order_choice = st.multiselect("Ordine dei livelli **tempo** (trascina/riordina)", options=auto_order, default=auto_order, key=k("ord_t"))
+if order_choice:
+    work["time"] = pd.Categorical(work["time"], categories=order_choice, ordered=True)
+else:
+    work["time"] = pd.Categorical(work["time"], categories=auto_order, ordered=True)
+
+st.markdown("#### Anteprima dati (long)")
+st.dataframe(work.head(10), use_container_width=True)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# STEP 2 — CHECK ASSUNZIONI
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown("### 2) Verifica delle assunzioni")
+c1, c2, c3 = st.columns([1.2, 1.2, 1.6])
+with c1:
+    alpha = st.select_slider("α (significatività)", options=[0.01, 0.05, 0.10], value=0.05, key=k("alpha"))
+with c2:
+    check_norm = st.checkbox("Controlla **normalità** entro livello tempo (Shapiro)", value=True, key=k("chk_norm"))
+with c3:
+    check_spher = st.checkbox("Controlla **sfericità** (Mauchly, se disponibile)", value=True, key=k("chk_sph"))
+
+if check_norm and _has_scipy:
+    rows = []
+    for lev, g in work.groupby("time"):
+        yv = pd.to_numeric(g["y"], errors="coerce").dropna()
+        if len(yv) >= 3:
             try:
-                cph.fit(X, duration_col=time_col, event_col=event_col, show_progress=False)
-                st.markdown("**Tabella dei coefficienti (scala HR)**")
-                summ = cph.summary.copy()
-                cols = {
-                    "exp(coef)": "HR",
-                    "exp(coef) lower 95%": "HR CI 2.5%",
-                    "exp(coef) upper 95%": "HR CI 97.5%",
-                    "p": "p"
-                }
-                view = summ.rename(columns=cols)[["HR", "HR CI 2.5%", "HR CI 97.5%", "p"]].copy()
-                view = view.round(3)
-                st.dataframe(view, use_container_width=True)
+                # limiti Shapiro consigliati: n<=5000
+                samp = yv.sample(min(len(yv), 5000), random_state=123)
+                W, p = sps.shapiro(samp)
+            except Exception:
+                W, p = (np.nan, np.nan)
+        else:
+            W, p = (np.nan, np.nan)
+        rows.append([str(lev), len(yv), W, p])
+    tab_norm = pd.DataFrame(rows, columns=["Tempo", "N", "Shapiro W", "p"])
+    st.markdown("**Normalità (per livello tempo)**")
+    st.dataframe(tab_norm.round(4), use_container_width=True)
+    st.caption("p piccoli indicano **deviazione dalla normalità**. In presenza di forti deviazioni considerare **Friedman** o **LMM**.")
+elif check_norm and not _has_scipy:
+    st.info("SciPy non disponibile: salto il test di Shapiro.")
 
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Log-likelihood", f"{cph.log_likelihood_: .3f}")
-                try:
-                    aic_like = -2.0 * cph.log_likelihood_ + 2 * len(cph.params_)
-                    m2.metric("AIC (parz.)", f"{aic_like:.1f}")
-                except Exception:
-                    pass
-                try:
-                    concord = float(cph.concordance_index_)
-                    m3.metric("Concordance index", f"{concord:.3f}")
-                except Exception:
-                    pass
-
-                with st.expander("ℹ️ Come interpretare il **modello di Cox**", expanded=False):
-                    st.markdown(
-                        "- **HR (Hazard Ratio)**: fattore moltiplicativo sul **rischio istantaneo**. HR>1 aumenta il rischio, HR<1 lo riduce.  \n"
-                        "- **Intervallo di confidenza**: se il CI di HR **non** include 1, l’effetto è statisticamente significativo.  \n"
-                        "- **Concordance index**: probabilità che l’ordine dei tempi osservati sia coerente con l’ordine dei rischi stimati (discriminazione).  \n"
-                        "- **Ties**: gestiti con il metodo di **Efron** (default)."
-                    )
-
-                # Diagnostica PH (Schoenfeld)
-                st.markdown("#### Verifica dell’assunzione di **hazard proporzionali**")
-                try:
-                    zph = proportional_hazard_test(cph, X, time_transform="rank")
-                    ztab = zph.summary.copy()
-                    ztab = ztab.rename(columns={"test_statistic": "χ²", "p": "p"})
-                    ztab = ztab[["χ²", "p"]].round(4)
-                    st.dataframe(ztab, use_container_width=True)
-                    st.caption("p-value piccoli indicano **violazione** dell’assunzione PH per la covariata corrispondente (test su residui di Schoenfeld).")
-                except Exception as e:
-                    st.caption(f"Test di PH non disponibile: {e}")
-
-                # Sopravvivenza predetta (due profili)
-                with st.expander("📈 Sopravvivenza predetta per profili di covariate (facoltativo)"):
-                    base = X.drop(columns=[time_col, event_col]).median(numeric_only=True)
-                    prof1 = base.copy(); prof2 = base.copy()
-                    for c in base.index:
-                        if c in X.columns and pd.api.types.is_numeric_dtype(X[c]):
-                            prof2[c] = base[c] + X[c].std(ddof=1)
-                    try:
-                        sf1 = cph.predict_survival_function(prof1.to_frame().T)
-                        sf2 = cph.predict_survival_function(prof2.to_frame().T)
-                        figp = go.Figure()
-                        figp.add_trace(go.Scatter(x=sf1.index.values, y=sf1.values.flatten(),
-                                                  mode="lines", name="Profilo 1 (baseline)",
-                                                  line=dict(width=3)))
-                        figp.add_trace(go.Scatter(x=sf2.index.values, y=sf2.values.flatten(),
-                                                  mode="lines", name="Profilo 2 (+1 SD numeriche)",
-                                                  line=dict(width=3, dash="dash")))
-                        figp.update_layout(template="simple_white", height=420,
-                                           title="Sopravvivenza predetta (Cox)",
-                                           xaxis_title=f"Tempo ({time_col})", yaxis_title="S(t)")
-                        st.plotly_chart(figp, use_container_width=True)
-                        st.caption("Confrontare i profili per quantificare l’effetto combinato delle covariate sulla sopravvivenza prevista.")
-                    except Exception:
-                        st.info("Impossibile calcolare le curve predette con il profilo scelto.")
-
-                # ───────── Sintesi automatica risultati Cox
-                with st.expander("📝 Interpretazione automatica — Cox PH", expanded=True):
-                    lines = []
-                    # covariate significative
-                    try:
-                        sig = view[view["p"] < alpha].sort_values("p")
-                        if not sig.empty:
-                            covs = " • ".join([f"{ix}: HR={row['HR']:.2f} (p={fmt_p(row['p'])})" for ix, row in sig.iterrows()])
-                            lines.append(f"**Covariate significative** (α={alpha:.2f}): {covs}.")
-                        else:
-                            lines.append(f"Nessuna covariata significativa al livello α={alpha:.2f}.")
-                    except Exception:
-                        pass
-                    # concordance index
-                    try:
-                        c_index = float(cph.concordance_index_)
-                        qualit = "ottima" if c_index >= 0.75 else ("discreta" if c_index >= 0.65 else "limitata")
-                        lines.append(f"**Concordance index** = {c_index:.3f} ⇒ capacità discriminante **{qualit}**.")
-                    except Exception:
-                        pass
-                    if not lines:
-                        lines.append("Nessuna sintesi disponibile (esiti modello non calcolabili).")
-                    st.markdown("\n\n".join([f"- {t}" for t in lines]))
-
-            except Exception as e:
-                st.error(f"Errore nella stima del modello di Cox: {e}")
+sphericity_p = None
+epsilon_gg = epsilon_hf = None
+if check_spher:
+    if _has_pg:
+        try:
+            # pingouin richiede dati wide per sfericità: pivot per soggetto × tempo
+            wide = work.pivot_table(index="id", columns="time", values="y", aggfunc="mean")
+            spher, sphericity_p, W = pg.sphericity(wide.dropna(axis=0, how="any"))
+            # epsilon GG/HF
+            eps = pg.epsilon(wide.dropna(axis=0, how="any"))
+            epsilon_gg = float(eps.loc["GG", "epsilon"]) if "GG" in eps.index else None
+            epsilon_hf = float(eps.loc["HF", "epsilon"]) if "HF" in eps.index else None
+            st.metric("Test di Mauchly (sfericità) — p", fmt_p(float(sphericity_p)) if sphericity_p is not None else "—")
+            if epsilon_gg:
+                st.caption(f"Epsilon **Greenhouse–Geisser** ≈ {epsilon_gg:.3f} • Epsilon **Huynh–Feldt** ≈ {epsilon_hf:.3f}" if epsilon_hf else
+                           f"Epsilon **Greenhouse–Geisser** ≈ {epsilon_gg:.3f}")
+        except Exception as e:
+            st.info(f"Sfericità non valutabile: {e}")
     else:
-        st.info("Selezionare almeno **una** covariata per stimare il modello di Cox.")
+        st.info("Pingouin non disponibile: salto il test di sfericità. In alternativa usare **LMM** o applicare correzioni conservative.")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Esportazione tabelle principali
+# STEP 3 — SCELTA MODELLO E ANALISI
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("### 4) Esporta risultati")
-if 'tbl' in locals() and isinstance(tbl, pd.DataFrame):
-    csv_km = tbl.to_csv(index=False).encode("utf-8")
-    st.download_button("Scarica statistiche KM (CSV)", data=csv_km,
-                       file_name="km_summary.csv", mime="text/csv", key=k("dl_km"))
+st.markdown("### 3) Analisi")
+model_choice = st.radio("Scegli l’analisi principale", [
+    "ANOVA per misure ripetute (entro-soggetto)",
+    "Friedman (non parametrico)",
+    "Modello lineare a effetti misti (LMM)"
+], index=0, key=k("model"))
+
+# ———————————————————— ANOVA RM ————————————————————
+if model_choice.startswith("ANOVA"):
+    if not _has_sm:
+        st.error("Statsmodels non disponibile: impossibile eseguire AnovaRM. Usi **Friedman** o **LMM**.")
+        st.stop()
+
+    # AnovaRM richiede dati completi (complete-case per soggetto)
+    comp = work.dropna(subset=["y"])
+    counts = comp.groupby("id")["time"].nunique()
+    full_ids = counts[counts == work["time"].nunique()].index
+    anova_df = comp[comp["id"].isin(full_ids)].copy()
+
+    if anova_df["id"].nunique() < 2 or anova_df["time"].nunique() < 2:
+        st.error("Dati insufficienti/bilanciamento insufficiente per AnovaRM. Usi **LMM** o **Friedman**.")
+    else:
+        try:
+            res = AnovaRM(anova_df, depvar="y", subject="id", within=["time"]).fit()
+            st.markdown("**ANOVA per misure ripetute (entro-soggetto)**")
+            st.dataframe(res.anova_table.round(4), use_container_width=True)
+
+            # Effetto del tempo: calcolo eta^2 parziale se disponibile
+            try:
+                row = res.anova_table.loc["time"]
+                F = float(row["F Value"]); df1 = float(row["Num DF"]); df2 = float(row["Den DF"])
+                eta_p2 = (F * df1) / (F * df1 + df2) if (F == F and df1 > 0 and df2 > 0) else np.nan
+            except Exception:
+                eta_p2 = np.nan
+
+            c1, c2, c3 = st.columns(3)
+            with c1: st.metric("Livelli tempo", f"{work['time'].nunique()}")
+            with c2: st.metric("Soggetti completi", f"{len(full_ids)}")
+            with c3: st.metric("η² parziale (tempo)", f"{eta_p2:.3f}" if eta_p2 == eta_p2 else "—")
+            st.caption("η² parziale ≈ proporzione di varianza dell’effetto di **tempo** sul totale residuo+effetto. 0.01 piccolo • 0.06 medio • 0.14 grande (indicativo).")
+
+            # Correzioni per sfericità (se disponibili)
+            if _has_pg and sphericity_p is not None and epsilon_gg is not None:
+                st.markdown("**Correzioni per sfericità**")
+                try:
+                    # Applico GG/HF ai gradi di libertà e ricalcolo p da F
+                    row = res.anova_table.loc["time"]
+                    F = float(row["F Value"]); df1 = float(row["Num DF"]); df2 = float(row["Den DF"])
+                    for label, eps in [("GG", epsilon_gg), ("HF", epsilon_hf)]:
+                        if eps and eps == eps:
+                            from scipy.stats import f as fdist if _has_scipy else (None)
+                            df1_c = eps * df1
+                            df2_c = eps * df2
+                            if _has_scipy:
+                                p_corr = float(fdist.sf(F, df1_c, df2_c))
+                                st.write(f"- **{label}**: F({df1_c:.2f}, {df2_c:.2f}) = {F:.3f}, p = {fmt_p(p_corr)}")
+                            else:
+                                st.write(f"- **{label}**: F({df1_c:.2f}, {df2_c:.2f}) = {F:.3f} (p non calcolabile senza SciPy)")
+                except Exception:
+                    pass
+            elif sphericity_p is not None:
+                st.caption("Sfericità violata: valutare **correzioni** o preferire **LMM**.")
+
+            # Confronti post-hoc (pairwise entro-soggetto)
+            with st.expander("Confronti **post-hoc** (pairwise entro-soggetto)"):
+                if _has_pg:
+                    pc = pg.pairwise_ttests(dv="y", within="time", subject="id", data=anova_df,
+                                            padjust="holm", effsize="hedges")
+                    st.dataframe(pc.round(4), use_container_width=True)
+                elif _has_scipy:
+                    # pairwise t-test per coppie di livelli
+                    levels = list(anova_df["time"].cat.categories if isinstance(anova_df["time"].dtype, pd.CategoricalDtype) else sorted(anova_df["time"].unique()))
+                    rows = []
+                    for a, b in itertools.combinations(levels, 2):
+                        da = anova_df[anova_df["time"] == a].set_index("id")["y"]
+                        db = anova_df[anova_df["time"] == b].set_index("id")["y"]
+                        common = da.index.intersection(db.index)
+                        if len(common) >= 3:
+                            t, p = sps.ttest_rel(da.loc[common], db.loc[common], nan_policy="omit")
+                            rows.append([a, b, float(t), float(p)])
+                    if rows:
+                        dfp = pd.DataFrame(rows, columns=["A", "B", "t", "p"])
+                        dfp["p_Holm"] = holm_correction(dfp["p"].tolist())
+                        st.dataframe(dfp.round(4), use_container_width=True)
+                    else:
+                        st.info("Confronti non disponibili (campioni troppo piccoli).")
+                else:
+                    st.info("Né Pingouin né SciPy disponibili: impossibile calcolare i confronti post-hoc.")
+
+# ———————————————————— FRIEDMAN ————————————————————
+elif model_choice.startswith("Friedman"):
+    if not _has_scipy:
+        st.error("SciPy non disponibile: impossibile eseguire il test di Friedman.")
+    else:
+        wide = work.pivot_table(index="id", columns="time", values="y", aggfunc="mean")
+        wide = wide.dropna(axis=0, how="any")
+        levels = list(wide.columns)
+        if wide.shape[0] < 2 or len(levels) < 3:
+            st.error("Friedman richiede ≥2 soggetti completi e ≥3 tempi.")
+        else:
+            # Friedman
+            samples = [wide[c].values for c in levels]
+            Q, p = sps.friedmanchisquare(*samples)
+            st.markdown("**Test di Friedman (non parametrico)**")
+            st.write(f"Q = {Q:.3f}, p = {fmt_p(p)}")
+            st.caption("Friedman testa differenze **mediane** tra tempi (entro-soggetto) senza assumere normalità.")
+
+            # Post-hoc Wilcoxon con Holm
+            with st.expander("Confronti post-hoc (Wilcoxon con Holm)"):
+                rows = []
+                for a, b in itertools.combinations(levels, 2):
+                    w, p = sps.wilcoxon(wide[a], wide[b], zero_method="wilcox", alternative="two-sided", correction=False)
+                    rows.append([a, b, float(w), float(p)])
+                dfp = pd.DataFrame(rows, columns=["A", "B", "W", "p"])
+                dfp["p_Holm"] = holm_correction(dfp["p"].tolist())
+                st.dataframe(dfp.round(4), use_container_width=True)
+
+# ———————————————————— LMM ————————————————————
+else:
+    if not _has_sm:
+        st.error("Statsmodels non disponibile: impossibile eseguire LMM.")
+    else:
+        treat_time_as = st.radio("Trattamento del **tempo**", ["Categorico (C(time))", "Lineare (tempo numerico)"], horizontal=True, key=k("time_as"))
+        # Costruzione formula
+        if treat_time_as.startswith("Categorico"):
+            formula = "y ~ C(time)"
+        else:
+            # prova a estrarre componente numerica dal livello
+            def to_num(s):
+                import re
+                m = re.findall(r"[-+]?\d*\.?\d+", str(s))
+                return float(m[0]) if m else np.nan
+            work["_time_num"] = work["time"].map(to_num)
+            if work["_time_num"].isna().all():
+                st.warning("Impossibile interpretare il tempo come numerico dai livelli. Uso C(time).")
+                formula = "y ~ C(time)"
+            else:
+                formula = "y ~ _time_num"
+
+        if "between" in work.columns:
+            formula = formula + " + C(between)"
+
+        st.code(f"MixedLM: {formula} + (1 | id)")
+
+        # Modello con random intercept per soggetto
+        try:
+            md = smf.mixedlm(formula, data=work, groups=work["id"])
+            mdf = md.fit(method="lbfgs", reml=True, maxiter=200)
+            st.markdown("**Modello lineare a effetti misti (random intercept per soggetto)**")
+            st.text(mdf.summary().as_text())
+
+            # Omnibus per l'effetto del tempo (LRT vs modello nullo)
+            try:
+                md0 = smf.mixedlm("y ~ 1" + (" + C(between)" if "between" in work.columns else ""),
+                                  data=work, groups=work["id"])
+                m0 = md0.fit(method="lbfgs", reml=True, maxiter=200)
+                ll1, ll0 = float(mdf.llf), float(m0.llf)
+                chi2 = 2 * (ll1 - ll0)
+                df_diff = mdf.df_modelwc - m0.df_modelwc
+                from scipy.stats import chi2 as chi2dist if _has_scipy else (None)
+                if _has_scipy and df_diff > 0:
+                    p_lrt = float(chi2dist.sf(chi2, df=int(df_diff)))
+                    st.metric("LRT (tempo vs nullo) — p", fmt_p(p_lrt))
+                else:
+                    st.caption(f"LRT non disponibile (df={df_diff}).")
+            except Exception:
+                pass
+
+            # Confronti marginal means (solo se Pingouin)
+            with st.expander("Confronti marginali stimati (EMMs) tra tempi"):
+                if _has_pg:
+                    try:
+                        emms = pg.marginal_means(data=work, dv="y", within="time", subject="id")
+                        st.dataframe(emms.round(4), use_container_width=True)
+                        if _has_scipy:
+                            # pairwise sulle emmeans con Holm
+                            levs = list(work["time"].cat.categories if isinstance(work["time"].dtype, pd.CategoricalDtype) else sorted(work["time"].unique()))
+                            rows = []
+                            for a, b in itertools.combinations(levs, 2):
+                                ya = work.loc[work["time"] == a, "y"].groupby(work["id"]).mean()
+                                yb = work.loc[work["time"] == b, "y"].groupby(work["id"]).mean()
+                                common = ya.index.intersection(yb.index)
+                                if len(common) >= 3:
+                                    t, p = sps.ttest_rel(ya.loc[common], yb.loc[common], nan_policy="omit")
+                                    rows.append([a, b, float(t), float(p)])
+                            if rows:
+                                dfp = pd.DataFrame(rows, columns=["A", "B", "t", "p"])
+                                dfp["p_Holm"] = holm_correction(dfp["p"].tolist())
+                                st.dataframe(dfp.round(4), use_container_width=True)
+                    except Exception as e:
+                        st.info(f"EMMs non disponibili: {e}")
+                else:
+                    st.info("Pingouin non disponibile: stima EMMs non eseguita.")
+
+        except Exception as e:
+            st.error(f"Errore nella stima LMM: {e}")
+            st.stop()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Navigazione
+# STEP 4 — GRAFICI
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown("### 4) Visualizzazioni")
+g1, g2 = st.columns(2)
+
+with g1:
+    show_spaghetti = st.checkbox("Mostra **spaghetti plot** (traiettorie individuali)", value=False, key=k("spag"))
+    if px is not None:
+        if show_spaghetti:
+            # campionamento se troppi soggetti
+            ids = work["id"].unique().tolist()
+            max_lines = st.slider("Numero massimo soggetti nel grafico", min_value=10, max_value=300, value=min(100, len(ids)), key=k("maxlines"))
+            sel_ids = ids[:max_lines]
+            fig = px.line(work[work["id"].isin(sel_ids)].sort_values(["id","time"]),
+                          x="time", y="y", color="id", line_group="id",
+                          template="simple_white", markers=True,
+                          title="Traiettorie individuali (spaghetti)")
+            fig.update_layout(showlegend=False, height=420, xaxis_title="Tempo", yaxis_title="Misura")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            agg = work.groupby("time")["y"].agg(["mean", "std", "count"]).reset_index()
+            agg["se"] = agg["std"] / np.sqrt(agg["count"])
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=agg["time"], y=agg["mean"], mode="lines+markers", name="Media",
+                                     line=dict(width=3)))
+            fig.add_trace(go.Scatter(x=agg["time"], y=agg["mean"] + 1.96*agg["se"], mode="lines",
+                                     line=dict(width=0), showlegend=False))
+            fig.add_trace(go.Scatter(x=agg["time"], y=agg["mean"] - 1.96*agg["se"], mode="lines",
+                                     fill="tonexty", fillcolor="rgba(127,127,127,0.15)",
+                                     line=dict(width=0), showlegend=False))
+            fig.update_layout(template="simple_white", height=420, title="Media ± IC 95% nel tempo",
+                              xaxis_title="Tempo", yaxis_title="Misura")
+            st.plotly_chart(fig, use_container_width=True)
+
+with g2:
+    if px is not None:
+        plot_kind = st.radio("Distribuzione per tempo", ["Box", "Violin"], horizontal=True, key=k("dist_kind"))
+        if plot_kind == "Box":
+            fig = px.box(work, x="time", y="y", color="time", points="outliers", template="simple_white",
+                         title="Distribuzione per tempo (boxplot)")
+        else:
+            fig = px.violin(work, x="time", y="y", color="time", box=True, points=False, template="simple_white",
+                            title="Distribuzione per tempo (violin + box)")
+        fig.update_layout(showlegend=False, height=420, xaxis_title="Tempo", yaxis_title="Misura")
+        st.plotly_chart(fig, use_container_width=True)
+
+# Se fattore between, media per gruppo
+if "between" in work.columns and px is not None:
+    st.markdown("#### Andamento medio per **gruppo (between)**")
+    agg2 = work.groupby(["between","time"])["y"].agg(["mean", "std", "count"]).reset_index()
+    agg2["se"] = agg2["std"] / np.sqrt(agg2["count"])
+    fig = go.Figure()
+    for gname, gdf in agg2.groupby("between"):
+        fig.add_trace(go.Scatter(x=gdf["time"], y=gdf["mean"], mode="lines+markers", name=str(gname), line=dict(width=3)))
+        fig.add_trace(go.Scatter(x=gdf["time"], y=gdf["mean"] + 1.96*gdf["se"], mode="lines",
+                                 line=dict(width=0), showlegend=False, hoverinfo="skip"))
+        fig.add_trace(go.Scatter(x=gdf["time"], y=gdf["mean"] - 1.96*gdf["se"], mode="lines",
+                                 fill="tonexty", fillcolor="rgba(127,127,127,0.12)",
+                                 line=dict(width=0), showlegend=False, hoverinfo="skip"))
+    fig.update_layout(template="simple_white", height=440,
+                      xaxis_title="Tempo", yaxis_title="Misura", title="Media ± IC 95% per gruppo")
+    st.plotly_chart(fig, use_container_width=True)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# STEP 5 — Come leggere i risultati (guide rapide)
+# ──────────────────────────────────────────────────────────────────────────────
+with st.expander("ℹ️ Come leggere i **risultati**"):
+    st.markdown(
+        "- **ANOVA RM**: l’effetto di **tempo** è significativo se p < α. In caso di **sfericità violata**, usare correzioni **GG/HF** (se disponibili) o preferire **LMM**.  \n"
+        "- **Friedman**: alternativa **non parametrica**; se p < α, eseguire **post-hoc** (Wilcoxon con Holm) per capire **quali** tempi differiscono.  \n"
+        "- **LMM**: robusto a **missing** e sbilanciamento; l’**LRT** tempo vs nullo indica se il pattern nel tempo è significativo. Coefficienti del modello quantificano direzione e grandezza degli effetti.  \n"
+        "- **Grafici**: la **media ± IC 95%** mostra l’andamento centrale e l’incertezza; lo **spaghetti plot** evidenzia l’eterogeneità individuale; i **box/violin** mostrano la dispersione per tempo."
+    )
+
+# ──────────────────────────────────────────────────────────────────────────────
+# NAVIGAZIONE
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 nav1, nav2 = st.columns(2)
 with nav1:
-    if st.button("⬅️ Torna: Agreement", use_container_width=True, key=k("go_prev")):
+    if st.button("⬅️ Torna: Sopravvivenza", use_container_width=True, key=k("go_prev")):
         try:
-            st.switch_page("pages/10_📏_Agreement.py")
+            st.switch_page("pages/11_🧭_Analisi_di_Sopravvivenza.py")
         except Exception:
             pass
 with nav2:
-    if st.button("➡️ Vai: Longitudinale — Misure ripetute", use_container_width=True, key=k("go_next")):
+    if st.button("➡️ Vai: Modulo successivo", use_container_width=True, key=k("go_next")):
+        # Prova alcune denominazioni possibili del modulo successivo
         for target in [
-            "pages/12_📈_Longitudinale_Misure_Ripetute.py",
-            "pages/12_📈_Longitudinale_Misure_Ripetute (1).py",
-            "pages/12_📈_Longitudinale_Misure_Ripetute....py"
+            "pages/13_📤_Export_Risultati.py",
+            "pages/13_🧾_Report_Automatico.py",
+            "pages/13_📦_Power_Analysis.py",
         ]:
             try:
                 st.switch_page(target)
