@@ -61,10 +61,10 @@ def k(name: str) -> str:
     return f"{KEY}_{name}"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Helper: ROC/PR, metriche e tabelle
+# Helper: ROC/PR, metriche, tabelle, figure
 # ──────────────────────────────────────────────────────────────────────────────
 def auc_mann_whitney(y_true: np.ndarray, score: np.ndarray) -> float:
-    """AUC = Pr(score_pos > score_neg) via U di Mann–Whitney."""
+    """AUC = Pr(score_pos > score_neg) via U di Mann–Whitney (equivalente alla ROC)."""
     try:
         from scipy.stats import rankdata
         y = np.asarray(y_true).astype(int)
@@ -78,12 +78,13 @@ def auc_mann_whitney(y_true: np.ndarray, score: np.ndarray) -> float:
         return float("nan")
 
 def roc_curve_strict(y_true: np.ndarray, score: np.ndarray, greater_is_positive: bool = True):
-    """ROC corretta con soglie ai valori distinti, gestione dei tie, include (0,0) e (1,1)."""
+    """ROC corretta: soglie ai valori distinti (desc), tie gestiti, include (0,0) e (1,1)."""
     y = np.asarray(y_true).astype(int)
     s = np.asarray(score).astype(float)
     if not greater_is_positive: s = -s
     P = int((y == 1).sum()); N = int((y == 0).sum())
-    if P == 0 or N == 0: return np.array([0.0, 1.0]), np.array([0.0, 1.0]), np.array([np.nan])
+    if P == 0 or N == 0:
+        return np.array([0.0, 1.0]), np.array([0.0, 1.0]), np.array([np.nan])
     order = np.argsort(-s, kind="mergesort")
     ys, ss = y[order], s[order]
     fpr = [0.0]; tpr = [0.0]; thr_list = [np.inf]
@@ -101,7 +102,7 @@ def roc_curve_strict(y_true: np.ndarray, score: np.ndarray, greater_is_positive:
     return np.array(fpr), np.array(tpr), np.array(thr_list)
 
 def pr_curve(y_true: np.ndarray, score: np.ndarray, greater_is_positive: bool = True):
-    """Precision–Recall con step ai valori distinti."""
+    """Precision–Recall con step sui valori distinti dello score."""
     y = np.asarray(y_true).astype(int)
     s = np.asarray(score).astype(float)
     if not greater_is_positive: s = -s
@@ -123,7 +124,7 @@ def pr_curve(y_true: np.ndarray, score: np.ndarray, greater_is_positive: bool = 
     return np.array(recalls), np.array(precisions)
 
 def metrics_at_threshold(y_true: np.ndarray, score: np.ndarray, thr: float, greater_is_positive: bool = True):
-    """Metriche a una soglia data."""
+    """Metriche per una soglia data (assoluta sullo score)."""
     y = np.asarray(y_true).astype(int)
     s = np.asarray(score).astype(float)
     if greater_is_positive: yhat = (s >= thr).astype(int)
@@ -149,7 +150,7 @@ def metrics_at_threshold(y_true: np.ndarray, score: np.ndarray, thr: float, grea
                 LR_plus=lr_p, LR_minus=lr_m, Youden=sens + spec - 1)
 
 def build_threshold_table(y_true: np.ndarray, score: np.ndarray, greater_is_positive: bool):
-    """Tabella metriche per tutte le soglie distinte (ordinate per soglia)."""
+    """Tabella metriche per tutte le soglie distinte (ordinate)."""
     s = np.asarray(score).astype(float)
     thr_unique = np.unique(np.sort(s))
     rows = [metrics_at_threshold(y_true, score, thr, greater_is_positive) for thr in thr_unique]
@@ -169,6 +170,50 @@ def confusion_table_counts_percent(TN, FP, FN, TP) -> pd.DataFrame:
          "Pred 1": [cell(FP, row0), cell(TP, row1)]},
         index=["Vera 0", "Vera 1"]
     )
+
+def make_roc_figure(fpr, tpr, auc_value, sens_at_thr, spec_at_thr, thr_label: str = ""):
+    """ROC classica: curva verde + area grigia + diagonale visibile + marker della soglia."""
+    fig = go.Figure()
+    # Curva ROC con area AUC (grigio)
+    fig.add_trace(go.Scatter(
+        x=fpr, y=tpr,
+        mode="lines", line_shape="hv",
+        line=dict(color="#2ecc71", width=3),
+        fill="tozeroy", fillcolor="rgba(128,128,128,0.35)",
+        name=f"ROC (AUC={auc_value:.3f})"
+    ))
+    # Diagonale come traccia (sopra il fill)
+    fig.add_trace(go.Scatter(
+        x=[0, 1], y=[0, 1],
+        mode="lines",
+        line=dict(color="rgba(0,0,0,0.7)", dash="dash", width=2),
+        name="No-skill"
+    ))
+    # Punto soglia corrente
+    fig.add_trace(go.Scatter(
+        x=[1 - spec_at_thr], y=[sens_at_thr],
+        mode="markers",
+        marker=dict(symbol="x", size=11, color="#2ecc71"),
+        name=(f"Soglia {thr_label}" if thr_label else "Soglia")
+    ))
+    # Etichette leggere "ROC" e "AUC"
+    fig.add_annotation(x=0.18, y=0.86, text="ROC", showarrow=False,
+                       font=dict(color="#2ecc71"))
+    fig.add_annotation(x=0.55, y=0.33, text="AUC", showarrow=False,
+                       font=dict(color="rgba(0,0,0,0.75)"))
+    # Stile classico
+    fig.update_layout(
+        template="simple_white",
+        title="Curva ROC",
+        xaxis_title="FPR (1 − Specificità)",
+        yaxis_title="TPR (Sensibilità)",
+        legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="left", x=0),
+        height=420,
+    )
+    fig.update_xaxes(range=[0, 1], showline=True, linewidth=2, linecolor="black")
+    fig.update_yaxes(range=[0, 1], showline=True, linewidth=2, linecolor="black",
+                     scaleanchor="x", scaleratio=1)
+    return fig
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Header
@@ -199,7 +244,7 @@ with c3:
     direction = st.selectbox("Direzione", ["Più alto = più positivo", "Più basso = più positivo"], key=k("dir"))
 
 y_raw = df[y_col]
-# binarizzazione outcome
+# Binarizzazione outcome
 if pd.api.types.is_numeric_dtype(y_raw) and set(pd.unique(y_raw.dropna())) <= {0, 1}:
     pos_label = 1
     y = y_raw.astype(int)
@@ -212,13 +257,13 @@ else:
 s = pd.to_numeric(df[score_col], errors="coerce")
 greater_is_positive = (direction == "Più alto = più positivo")
 
-# controllo classi
+# Controllo classi
 if y.nunique(dropna=True) < 2:
     st.error("L'outcome deve contenere entrambe le classi (0 e 1).")
     st.stop()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# STEP 2 — Scelta soglia e metriche
+# STEP 2 — Soglia e metriche
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("### 2) Soglia e metriche")
 df_thr, thr_youden, thr_f1 = build_threshold_table(y.values, s.values, greater_is_positive)
@@ -242,11 +287,11 @@ if   thr_mode.startswith("Ottimizza Youden"): thr = thr_youden
 elif thr_mode.startswith("Ottimizza F1"):     thr = thr_f1
 else:                                         thr = thr_manual
 
-# metriche a soglia selezionata
+# Metriche alla soglia scelta
 M   = metrics_at_threshold(y.values, s.values, thr, greater_is_positive)
 AUC = auc_mann_whitney(y.values, s.values)
 
-# pannello metriche con spiegazioni
+# Pannello metriche con brevi spiegazioni
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Accuracy", f"{M['Acc']:.3f}");   m1.caption("Quota di classificazioni corrette (dipende dal bilanciamento).")
 m2.metric("Sensibilità (TPR)", f"{M['Sens']:.3f}"); m2.caption("Pr(positivo predetto | positivo vero).")
@@ -275,34 +320,20 @@ st.dataframe(cm, use_container_width=True)
 st.markdown("### 3) Grafici")
 left, right = st.columns(2)
 
-# ROC classica (curva verde, area grigia, diagonale, marker soglia)
+# ROC classica (curva verde, area grigia, diagonale visibile, marker soglia)
 with left:
     if px is not None and go is not None and s.notna().any():
-        fpr, tpr, thr_list = roc_curve_strict(y.values, s.values, greater_is_positive)
-        figroc = go.Figure()
-        figroc.add_trace(go.Scatter(
-            x=fpr, y=tpr, mode="lines", line_shape="hv",
-            line=dict(color="#2ecc71", width=3),
-            fill="tozeroy", fillcolor="rgba(128,128,128,0.35)",
-            name=f"ROC (AUC={AUC:.3f})"
-        ))
-        figroc.add_shape(type="line", x0=0, y0=0, x1=1, y1=1, line=dict(color="rgba(0,0,0,0.5)", dash="dash"))
-        figroc.add_trace(go.Scatter(
-            x=[1 - M["Spec"]], y=[M["Sens"]], mode="markers",
-            marker=dict(symbol="x", size=10, color="#2ecc71"),
-            name=f"Soglia {thr:.2f}"
-        ))
-        figroc.update_layout(
-            template="simple_white", title="Curva ROC",
-            xaxis_title="FPR (1 − Specificità)", yaxis_title="TPR (Sensibilità)",
-            legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="left", x=0),
+        fpr, tpr, _ = roc_curve_strict(y.values, s.values, greater_is_positive)
+        figroc = make_roc_figure(
+            fpr=fpr, tpr=tpr,
+            auc_value=AUC,
+            sens_at_thr=M["Sens"],
+            spec_at_thr=M["Spec"],
+            thr_label=f"{thr:.2f}"
         )
-        figroc.update_xaxes(range=[0, 1], showline=True, linewidth=2, linecolor="black")
-        figroc.update_yaxes(range=[0, 1], showline=True, linewidth=2, linecolor="black",
-                            scaleanchor="x", scaleratio=1)
         st.plotly_chart(figroc, use_container_width=True)
 
-# PR curve + distribuzione score (con soglie annotabili: percentili o valori assoluti)
+# PR curve + distribuzione score (soglie annotate: percentili o valori assoluti)
 with right:
     if px is not None and go is not None and s.notna().any():
         t1, t2 = st.tabs(["📈 Precision–Recall", "📊 Distribuzione score"])
@@ -384,9 +415,17 @@ with right:
 
 with st.expander("ℹ️ Come leggere i grafici", expanded=False):
     st.markdown(
-        "- **ROC**: curva verde con **area grigia** (AUC). La diagonale è il caso casuale; il marcatore è la **soglia**.  \n"
-        "- **PR**: utile con classi sbilanciate; la linea tratteggiata è la **prevalenza**. I punti annotati mostrano Precision/Recall alle soglie scelte (percentili **o** valori assoluti).  \n"
-        "- **Distribuzione score**: separazione netta ⇒ migliore discriminazione; la linea tratteggiata è la soglia corrente."
+        "**Curva ROC**  \n"
+        "- **Assi**: orizzontale = **FPR** = 1 − Specificità; verticale = **TPR** = Sensibilità.  \n"
+        "- **Diagonale tratteggiata**: classificatore casuale (AUC = 0.5).  \n"
+        "- **AUC**: area grigia sotto la curva; misura la capacità di **discriminare** (0.5=casuale, >0.8=ottima, 1=perfetta).  \n"
+        "- **Soglia**: il marcatore mostra Sensibilità/Specificità alla **soglia corrente**; modificando la soglia ci si muove lungo la curva.  \n"
+        "- **Uso**: utile quando le classi non sono troppo sbilanciate o serve valutare la discriminazione **indipendentemente** dalla soglia.\n\n"
+        "**Curva Precision–Recall (PR)**  \n"
+        "- **Assi**: orizzontale = **Recall** (Sensibilità), verticale = **Precision** (PPV).  \n"
+        "- **Linea orizzontale**: **prevalenza** (baseline della Precision).  \n"
+        "- **Interpretazione**: quanto più la curva sta **in alto a destra**, tanto meglio. Con **sbilanciamento di classe**, la PR è più informativa della ROC.  \n"
+        "- **Punti annotati**: mostrano Precision e Recall a soglie **assolute** o per **percentile**; selezioni la soglia in base ai **costi degli errori** (Sensibilità per screening, Precision per conferma)."
     )
 
 # ──────────────────────────────────────────────────────────────────────────────
