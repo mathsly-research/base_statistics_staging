@@ -61,10 +61,10 @@ def k(name: str) -> str:
     return f"{KEY}_{name}"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Helper: ROC/PR, metriche, tabelle, figure
+# Helper: ROC/PR, metriche, tabelle
 # ──────────────────────────────────────────────────────────────────────────────
 def auc_mann_whitney(y_true: np.ndarray, score: np.ndarray) -> float:
-    """AUC = Pr(score_pos > score_neg) via U di Mann–Whitney (equivalente alla ROC)."""
+    """AUC = Pr(score_pos > score_neg) via U di Mann–Whitney."""
     try:
         from scipy.stats import rankdata
         y = np.asarray(y_true).astype(int)
@@ -78,7 +78,7 @@ def auc_mann_whitney(y_true: np.ndarray, score: np.ndarray) -> float:
         return float("nan")
 
 def roc_curve_strict(y_true: np.ndarray, score: np.ndarray, greater_is_positive: bool = True):
-    """ROC corretta: soglie ai valori distinti (desc), tie gestiti, include (0,0) e (1,1)."""
+    """ROC corretta: soglie ai valori distinti (discendente), gestione tie; include (0,0) e (1,1)."""
     y = np.asarray(y_true).astype(int)
     s = np.asarray(score).astype(float)
     if not greater_is_positive: s = -s
@@ -171,37 +171,92 @@ def confusion_table_counts_percent(TN, FP, FN, TP) -> pd.DataFrame:
         index=["Vera 0", "Vera 1"]
     )
 
-def make_roc_figure(fpr, tpr, auc_value, sens_at_thr, spec_at_thr, thr_label: str = ""):
-    """ROC classica: curva verde + area grigia + diagonale visibile + marker della soglia."""
+# ── Smussamento ROC ───────────────────────────────────────────────────────────
+def _uniq_monotone(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Rende FPR unico crescente e TPR non decrescente (max per FPR duplicati)."""
+    df = pd.DataFrame({"x": x, "y": y}).groupby("x", as_index=False)["y"].max().sort_values("x")
+    xx = df["x"].to_numpy()
+    yy = df["y"].to_numpy()
+    # assicura non-decrescenza
+    yy = np.maximum.accumulate(yy)
+    return xx, yy
+
+def smooth_roc(fpr: np.ndarray, tpr: np.ndarray, grid_points: int = 300) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Smussa la ROC in modo monotòno:
+    - usa PCHIP se disponibile; altrimenti interp lineare su griglia densa;
+    - forza (0,0) e (1,1) e clamp a [0,1].
+    """
+    # garantisce punti 0 e 1
+    fpr = np.asarray(fpr, float); tpr = np.asarray(tpr, float)
+    pts = np.vstack([fpr, tpr]).T
+    pts = np.vstack([[0.0, 0.0], pts, [1.0, 1.0]])
+    fpr_u, tpr_u = _uniq_monotone(pts[:, 0], pts[:, 1])
+
+    grid = np.linspace(0.0, 1.0, grid_points)
+    try:
+        from scipy.interpolate import PchipInterpolator  # monotone shape-preserving
+        interp = PchipInterpolator(fpr_u, tpr_u, extrapolate=False)
+        tpr_s = interp(grid)
+    except Exception:
+        # fallback: interpolazione lineare + cumulativo per monotonia
+        tpr_s = np.interp(grid, fpr_u, tpr_u)
+    tpr_s = np.clip(tpr_s, 0.0, 1.0)
+    tpr_s = np.maximum.accumulate(tpr_s)
+    return grid, tpr_s
+
+def make_roc_figure(fpr, tpr, auc_value, sens_at_thr, spec_at_thr, thr_label: str = "",
+                    style: str = "classic", smooth: bool = False):
+    """
+    ROC:
+    - style='classic' → verde, linea piena; style='soft' → rosso, tratteggiata (come l'immagine).
+    - smooth=True → curva smussata (PCHIP se disponibile).
+    """
+    # Prepara punti (eventuale smoothing)
+    if smooth:
+        x_plot, y_plot = smooth_roc(fpr, tpr)
+    else:
+        # garantisce (0,0) e (1,1) anche nella visualizzazione
+        x_plot, y_plot = _uniq_monotone(np.array(fpr, float), np.array(tpr, float))
+        if x_plot[0] > 0:
+            x_plot = np.insert(x_plot, 0, 0.0); y_plot = np.insert(y_plot, 0, 0.0)
+        if x_plot[-1] < 1:
+            x_plot = np.append(x_plot, 1.0);    y_plot = np.append(y_plot, 1.0)
+
+    # Stili
+    if style == "soft":
+        line_color = "#8e1b1b"
+        line_dash = "dot"
+        fill_color = "rgba(200,0,0,0.20)"
+        marker_color = "#8e1b1b"
+    else:
+        line_color = "#2ecc71"
+        line_dash = None
+        fill_color = "rgba(128,128,128,0.35)"
+        marker_color = "#2ecc71"
+
     fig = go.Figure()
-    # Curva ROC con area AUC (grigio)
     fig.add_trace(go.Scatter(
-        x=fpr, y=tpr,
-        mode="lines", line_shape="hv",
-        line=dict(color="#2ecc71", width=3),
-        fill="tozeroy", fillcolor="rgba(128,128,128,0.35)",
+        x=x_plot, y=y_plot,
+        mode="lines",
+        line=dict(color=line_color, width=3, dash=line_dash),
+        fill="tozeroy", fillcolor=fill_color,
         name=f"ROC (AUC={auc_value:.3f})"
     ))
-    # Diagonale come traccia (sopra il fill)
+    # Diagonale disegnata SOPRA l'area
     fig.add_trace(go.Scatter(
         x=[0, 1], y=[0, 1],
         mode="lines",
-        line=dict(color="rgba(0,0,0,0.7)", dash="dash", width=2),
+        line=dict(color="rgba(0,0,0,0.75)", dash="dash", width=2),
         name="No-skill"
     ))
-    # Punto soglia corrente
+    # Punto alla soglia corrente
     fig.add_trace(go.Scatter(
         x=[1 - spec_at_thr], y=[sens_at_thr],
         mode="markers",
-        marker=dict(symbol="x", size=11, color="#2ecc71"),
+        marker=dict(symbol="x", size=11, color=marker_color),
         name=(f"Soglia {thr_label}" if thr_label else "Soglia")
     ))
-    # Etichette leggere "ROC" e "AUC"
-    fig.add_annotation(x=0.18, y=0.86, text="ROC", showarrow=False,
-                       font=dict(color="#2ecc71"))
-    fig.add_annotation(x=0.55, y=0.33, text="AUC", showarrow=False,
-                       font=dict(color="rgba(0,0,0,0.75)"))
-    # Stile classico
     fig.update_layout(
         template="simple_white",
         title="Curva ROC",
@@ -315,25 +370,35 @@ cm = confusion_table_counts_percent(M["TN"], M["FP"], M["FN"], M["TP"])
 st.dataframe(cm, use_container_width=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# STEP 3 — Grafici (ROC classica + PR + distribuzione score)
+# STEP 3 — Grafici (ROC classica/morbida + PR + distribuzione score)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("### 3) Grafici")
 left, right = st.columns(2)
 
-# ROC classica (curva verde, area grigia, diagonale visibile, marker soglia)
 with left:
     if px is not None and go is not None and s.notna().any():
         fpr, tpr, _ = roc_curve_strict(y.values, s.values, greater_is_positive)
+
+        opt1, opt2 = st.columns([1.3, 1.7])
+        with opt1:
+            roc_smooth = st.checkbox("Andamento morbido (interpolato)", value=True, key=k("roc_smooth"))
+        with opt2:
+            roc_style = st.selectbox("Stile curva",
+                                     ["Classico (verde)", "Morbido (rosso)"],
+                                     index=1 if roc_smooth else 0, key=k("roc_style"))
+
+        style = "soft" if roc_style.startswith("Morbido") else "classic"
         figroc = make_roc_figure(
             fpr=fpr, tpr=tpr,
             auc_value=AUC,
             sens_at_thr=M["Sens"],
             spec_at_thr=M["Spec"],
-            thr_label=f"{thr:.2f}"
+            thr_label=f"{thr:.2f}",
+            style=style,
+            smooth=roc_smooth
         )
         st.plotly_chart(figroc, use_container_width=True)
 
-# PR curve + distribuzione score (soglie annotate: percentili o valori assoluti)
 with right:
     if px is not None and go is not None and s.notna().any():
         t1, t2 = st.tabs(["📈 Precision–Recall", "📊 Distribuzione score"])
@@ -355,7 +420,7 @@ with right:
             low_thr = high_thr = None
             if add_compare:
                 if method == "Percentili":
-                    pct_low, pct_high = st.slider("Seleziona percentili (basso, alto)",
+                    pct_low, pct_high = st.slider("Percentili (basso, alto)",
                                                   min_value=0, max_value=100, value=(10, 90), step=1, key=k("pr_pcts"))
                     if s.notna().any():
                         low_thr  = float(np.percentile(s.dropna(), pct_low))
@@ -416,16 +481,16 @@ with right:
 with st.expander("ℹ️ Come leggere i grafici", expanded=False):
     st.markdown(
         "**Curva ROC**  \n"
-        "- **Assi**: orizzontale = **FPR** = 1 − Specificità; verticale = **TPR** = Sensibilità.  \n"
+        "- **Assi**: orizzontale = **FPR** (1 − Specificità); verticale = **TPR** (Sensibilità).  \n"
         "- **Diagonale tratteggiata**: classificatore casuale (AUC = 0.5).  \n"
-        "- **AUC**: area grigia sotto la curva; misura la capacità di **discriminare** (0.5=casuale, >0.8=ottima, 1=perfetta).  \n"
-        "- **Soglia**: il marcatore mostra Sensibilità/Specificità alla **soglia corrente**; modificando la soglia ci si muove lungo la curva.  \n"
-        "- **Uso**: utile quando le classi non sono troppo sbilanciate o serve valutare la discriminazione **indipendentemente** dalla soglia.\n\n"
+        "- **AUC**: area sotto la curva; misura la **discriminazione** (0.5=casuale, >0.8=ottima, 1=perfetta).  \n"
+        "- **Soglia**: il marcatore indica Sensibilità/Specificità alla soglia corrente; variando la soglia ci si muove lungo la curva.  \n"
+        "- **Curva morbida**: è un’interpolazione monotòna dei punti ROC (estetica/leggibilità), non cambia l’AUC.\n\n"
         "**Curva Precision–Recall (PR)**  \n"
         "- **Assi**: orizzontale = **Recall** (Sensibilità), verticale = **Precision** (PPV).  \n"
         "- **Linea orizzontale**: **prevalenza** (baseline della Precision).  \n"
-        "- **Interpretazione**: quanto più la curva sta **in alto a destra**, tanto meglio. Con **sbilanciamento di classe**, la PR è più informativa della ROC.  \n"
-        "- **Punti annotati**: mostrano Precision e Recall a soglie **assolute** o per **percentile**; selezioni la soglia in base ai **costi degli errori** (Sensibilità per screening, Precision per conferma)."
+        "- **Interpretazione**: più la curva è **in alto a destra**, meglio è. Con **classi sbilanciate** la PR è spesso più informativa della ROC.  \n"
+        "- **Punti annotati**: Precision/Recall a soglie **assolute** o per **percentile**; scelga la soglia in base ai **costi degli errori**."
     )
 
 # ──────────────────────────────────────────────────────────────────────────────
