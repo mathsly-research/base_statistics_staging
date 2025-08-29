@@ -97,7 +97,7 @@ def safe_switch_by_tokens(primary_candidates: list[str], fallback_tokens: list[s
     st.error("Pagina richiesta non trovata nei file di /pages. Verificare i nomi reali.")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Utility SEM: validazioni, sanitizzazione nomi, affidabilità
+# Utility SEM: validazioni, sanitizzazione nomi, affidabilità, fit
 # ──────────────────────────────────────────────────────────────────────────────
 def fmt_p(p: float | None) -> str:
     if p is None or p != p: return "—"
@@ -187,9 +187,7 @@ def pretty_table(df: pd.DataFrame, title: str):
     st.markdown(f"**{title}**")
     st.dataframe(df, width="stretch")
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Fallback Plotly per il diagramma SEM (senza Graphviz)
-# ──────────────────────────────────────────────────────────────────────────────
 def draw_sem_plotly(latents_config: list[dict], regressions: list[dict] | None = None):
     """Disegna un diagramma SEM basilare con Plotly (niente binario 'dot' richiesto)."""
     if go is None or not latents_config:
@@ -275,11 +273,73 @@ def draw_sem_plotly(latents_config: list[dict], regressions: list[dict] | None =
     )
     return fig
 
+def _extract_fit_table(stats_obj) -> pd.DataFrame:
+    """
+    Uniforma gli indici di fit di semopy in una tabella `metric, value`
+    a prescindere dalla versione/forma di ritorno.
+    """
+    import pandas as pd
+    import numpy as np
+
+    # Caso 1: DataFrame già pronto (varie forme possibili)
+    if isinstance(stats_obj, pd.DataFrame):
+        df = stats_obj.copy()
+        cand_pairs = [("name", "value"), ("metric", "value"), ("Statistic", "Value")]
+        for c_metric, c_value in cand_pairs:
+            if {c_metric, c_value}.issubset(df.columns):
+                out = df[[c_metric, c_value]].rename(columns={c_metric: "metric", c_value: "value"})
+                return out
+        if df.shape[1] == 1:
+            out = df.reset_index()
+            out.columns = ["metric", "value"]
+            return out
+        if df.shape[1] == 2:
+            out = df.copy()
+            out.columns = ["metric", "value"]
+            return out
+        try:
+            out = df.melt(var_name="metric", value_name="value")
+            return out
+        except Exception:
+            pass
+        return pd.DataFrame({"metric": [], "value": []})
+
+    # Caso 2: Oggetto con dizionario interno / metodi to_dict
+    for attr in ["stats", "statistics"]:
+        try:
+            obj = getattr(stats_obj, attr)
+            data = obj() if callable(obj) else obj
+            if isinstance(data, dict):
+                return pd.DataFrame({"metric": list(data.keys()), "value": list(data.values())})
+        except Exception:
+            pass
+    for meth in ["to_dict", "as_dict"]:
+        try:
+            data = getattr(stats_obj, meth)()
+            if isinstance(data, dict):
+                return pd.DataFrame({"metric": list(data.keys()), "value": list(data.values())})
+        except Exception:
+            pass
+
+    # Caso 3: Leggi attributi comuni
+    keys = ["chi2", "df", "p-value", "p_value", "CFI", "TLI", "RMSEA", "SRMR", "AIC", "BIC"]
+    rows = []
+    for k in keys:
+        try:
+            if hasattr(stats_obj, k):
+                rows.append((k, getattr(stats_obj, k)))
+        except Exception:
+            pass
+    if rows:
+        return pd.DataFrame(rows, columns=["metric", "value"])
+
+    return pd.DataFrame({"metric": [], "value": []})
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Header
 # ──────────────────────────────────────────────────────────────────────────────
 st.title("🧩 Structural Equation Modeling (SEM)")
-st.caption("CFA/SEM con validazioni robuste all’inserimento dei costrutti, sanitizzazione automatica dei nomi, indici di fit e diagramma con fallback.")
+st.caption("CFA/SEM con validazioni robuste all’inserimento dei costrutti, indici di fit resilienti e diagramma con fallback.")
 
 with st.expander("Stato dati", expanded=False):
     stamp_meta()
@@ -520,7 +580,7 @@ for comp in st.session_state[k("latents")]:
 pretty_table(pd.DataFrame(rel_rows), "Affidabilità di base")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6) Stima SEM con semopy (con fallback del diagramma)
+# 6) Stima SEM con semopy (fit robusto + diagramma)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("### 6) Stima del modello e risultati")
 
@@ -547,16 +607,15 @@ try:
     if not isinstance(est_df, pd.DataFrame):
         est_df = pd.DataFrame(est_df)
 
-    # Indici di fit
+    # Indici di fit (robusti a versioni diverse di semopy)
     try:
-        stats = calc_stats(model, work_ren)
-        if isinstance(stats, pd.DataFrame):
-            fit = stats.copy()
-        else:
-            keys = ["chi2", "df", "p-value", "CFI", "TLI", "RMSEA", "SRMR", "AIC", "BIC"]
-            values = [getattr(stats, k, np.nan) for k in keys]
-            fit = pd.DataFrame({"metric": keys, "value": values})
-    except Exception:
+        try:
+            stats_obj = calc_stats(model, work_ren)   # alcune versioni richiedono anche i dati
+        except TypeError:
+            stats_obj = calc_stats(model)             # altre versioni accettano solo il modello
+        fit = _extract_fit_table(stats_obj)
+    except Exception as e:
+        st.info(f"Impossibile calcolare gli indici di fit: {e}")
         fit = pd.DataFrame({"metric": [], "value": []})
 
     # Mappa inversa per visualizzare nomi originali
@@ -596,25 +655,83 @@ try:
     else:
         pretty_table(est_df.round(4), "Stime dei parametri")
 
+    # ── Indici di bontà d’adattamento (tabella + metriche sintetiche)
     st.markdown("**Indici di bontà d’adattamento**")
-    if isinstance(fit, pd.DataFrame) and ("metric" in fit.columns and "value" in fit.columns):
+
+    def _norm_key(s: str) -> str:
+        return str(s).replace("_", "").replace("-", "").upper()
+
+    # Mappa metrica → valore
+    fit_map = {}
+    try:
+        for _, row in fit.iterrows():
+            m = str(row.get("metric", "")).strip()
+            v = row.get("value", np.nan)
+            if m:
+                fit_map[_norm_key(m)] = v
+    except Exception:
+        pass
+
+    # Helper per prelievo robusto (chiavi alternative)
+    def _get(*names, default=np.nan):
+        for n in names:
+            key = _norm_key(n)
+            if key in fit_map and pd.notna(fit_map[key]):
+                try:
+                    return float(fit_map[key])
+                except Exception:
+                    return fit_map[key]
+        return default
+
+    chi2  = _get("chi2")
+    dfv   = _get("df")
+    pval  = _get("p-value", "p_value")
+    cfi   = _get("CFI")
+    tli   = _get("TLI", "NNFI")
+    rmsea = _get("RMSEA")
+    srmr  = _get("SRMR")
+    aic   = _get("AIC")
+    bic   = _get("BIC")
+
+    # Tabella completa (se disponibile), ordinata
+    if not fit.empty:
+        order = ["chi2", "df", "p-value", "CFI", "TLI", "RMSEA", "SRMR", "AIC", "BIC"]
+        order_norm = [_norm_key(x) for x in order]
+        fit = fit.copy()
+        fit["__norm__"] = fit["metric"].astype(str).map(_norm_key)
+        fit = pd.concat([
+            fit.loc[fit["__norm__"].isin(order_norm)].sort_values(by="__norm__", key=lambda s: s.map({k:i for i,k in enumerate(order_norm)})),
+            fit.loc[~fit["__norm__"].isin(order_norm)]
+        ], axis=0)
+        fit = fit.drop(columns="__norm__", errors="ignore")
         st.dataframe(fit, width="stretch")
-        def get_fit(m):
-            try:
-                row = fit.loc[fit["metric"].str.upper()==m.upper(), "value"]
-                return float(row.iloc[0]) if not row.empty else np.nan
-            except Exception:
-                return np.nan
-        chi2 = get_fit("chi2"); dfv = get_fit("df"); pv = get_fit("p-value"); cfi = get_fit("CFI"); tli = get_fit("TLI"); rmsea = get_fit("RMSEA")
     else:
-        chi2=dfv=pv=cfi=tli=rmsea=np.nan
+        st.info("La versione di semopy in uso non espone una tabella standard di fit; sono mostrati gli indici principali in sintesi.")
 
     c1, c2, c3, c4 = st.columns(4)
-    with c1: st.metric("χ²/df", f"{(chi2/dfv):.2f}" if chi2==chi2 and dfv and dfv>0 else "—")
-    with c2: st.metric("CFI", f"{cfi:.3f}" if cfi==cfi else "—")
-    with c3: st.metric("TLI", f"{tli:.3f}" if tli==tli else "—")
-    with c4: st.metric("RMSEA", f"{rmsea:.3f}" if rmsea==rmsea else "—")
-    st.caption("Regole pratiche: CFI/TLI ≥ 0.90–0.95; RMSEA ≤ 0.06–0.08; SRMR ≤ 0.08.")
+    with c1:
+        st.metric("χ²/df", f"{(chi2/dfv):.2f}" if (pd.notna(chi2) and pd.notna(dfv) and dfv>0) else "—",
+                  help="Rapporto chi-quadro su gradi di libertà (più basso è, meglio è).")
+    with c2:
+        st.metric("CFI",   f"{cfi:.3f}" if pd.notna(cfi) else "—",
+                  help="Comparative Fit Index (≈0.90–0.95 buono).")
+    with c3:
+        st.metric("TLI",   f"{tli:.3f}" if pd.notna(tli) else "—",
+                  help="Tucker–Lewis Index (≈0.90–0.95 buono).")
+    with c4:
+        st.metric("RMSEA", f"{rmsea:.3f}" if pd.notna(rmsea) else "—",
+                  help="Root Mean Square Error of Approximation (≤0.06–0.08 accettabile).")
+
+    extra_cols = st.columns(3)
+    with extra_cols[0]:
+        st.metric("SRMR", f"{srmr:.3f}" if pd.notna(srmr) else "—",
+                  help="Standardized Root Mean Square Residual (≤0.08).")
+    with extra_cols[1]:
+        st.metric("AIC",  f"{aic:.2f}" if pd.notna(aic) else "—",
+                  help="Akaike Information Criterion (più basso è, meglio è).")
+    with extra_cols[2]:
+        st.metric("BIC",  f"{bic:.2f}" if pd.notna(bic) else "—",
+                  help="Bayesian Information Criterion (più basso è, meglio è).")
 
     # ── Diagramma del modello: Graphviz se disponibile, altrimenti fallback Plotly
     with st.expander("Diagramma del modello"):
