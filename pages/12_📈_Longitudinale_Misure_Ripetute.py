@@ -7,6 +7,7 @@ import math
 import numpy as np
 import pandas as pd
 import streamlit as st
+from pandas.api.types import is_categorical_dtype
 
 # Plotly
 try:
@@ -26,7 +27,7 @@ except Exception:
     _has_sm = False
 
 try:
-    from scipy import stats as sps
+    from scipy import stats as sps  # <-- usare sps.f, sps.chi2, sps.shapiro, ecc.
     _has_scipy = True
 except Exception:
     _has_scipy = False
@@ -236,7 +237,7 @@ if check_norm and _has_scipy:
         yv = pd.to_numeric(g["y"], errors="coerce").dropna()
         if len(yv) >= 3:
             try:
-                # limiti Shapiro consigliati: n<=5000
+                # limiti Shapiro: n<=5000
                 samp = yv.sample(min(len(yv), 5000), random_state=123)
                 W, p = sps.shapiro(samp)
             except Exception:
@@ -265,8 +266,7 @@ if check_spher:
             epsilon_hf = float(eps.loc["HF", "epsilon"]) if "HF" in eps.index else None
             st.metric("Test di Mauchly (sfericità) — p", fmt_p(float(sphericity_p)) if sphericity_p is not None else "—")
             if epsilon_gg:
-                st.caption(f"Epsilon **Greenhouse–Geisser** ≈ {epsilon_gg:.3f} • Epsilon **Huynh–Feldt** ≈ {epsilon_hf:.3f}" if epsilon_hf else
-                           f"Epsilon **Greenhouse–Geisser** ≈ {epsilon_gg:.3f}")
+                st.caption(f"Epsilon **Greenhouse–Geisser** ≈ {epsilon_gg:.3f}" + (f" • Epsilon **Huynh–Feldt** ≈ {epsilon_hf:.3f}" if epsilon_hf else ""))
         except Exception as e:
             st.info(f"Sfericità non valutabile: {e}")
     else:
@@ -302,7 +302,7 @@ if model_choice.startswith("ANOVA"):
             st.markdown("**ANOVA per misure ripetute (entro-soggetto)**")
             st.dataframe(res.anova_table.round(4), use_container_width=True)
 
-            # Effetto del tempo: calcolo eta^2 parziale se disponibile
+            # Effetto del tempo: eta^2 parziale
             try:
                 row = res.anova_table.loc["time"]
                 F = float(row["F Value"]); df1 = float(row["Num DF"]); df2 = float(row["Den DF"])
@@ -320,16 +320,14 @@ if model_choice.startswith("ANOVA"):
             if _has_pg and sphericity_p is not None and epsilon_gg is not None:
                 st.markdown("**Correzioni per sfericità**")
                 try:
-                    # Applico GG/HF ai gradi di libertà e ricalcolo p da F
                     row = res.anova_table.loc["time"]
                     F = float(row["F Value"]); df1 = float(row["Num DF"]); df2 = float(row["Den DF"])
                     for label, eps in [("GG", epsilon_gg), ("HF", epsilon_hf)]:
                         if eps and eps == eps:
-                            from scipy.stats import f as fdist if _has_scipy else (None)
                             df1_c = eps * df1
                             df2_c = eps * df2
                             if _has_scipy:
-                                p_corr = float(fdist.sf(F, df1_c, df2_c))
+                                p_corr = float(sps.f.sf(F, df1_c, df2_c))
                                 st.write(f"- **{label}**: F({df1_c:.2f}, {df2_c:.2f}) = {F:.3f}, p = {fmt_p(p_corr)}")
                             else:
                                 st.write(f"- **{label}**: F({df1_c:.2f}, {df2_c:.2f}) = {F:.3f} (p non calcolabile senza SciPy)")
@@ -346,7 +344,10 @@ if model_choice.startswith("ANOVA"):
                     st.dataframe(pc.round(4), use_container_width=True)
                 elif _has_scipy:
                     # pairwise t-test per coppie di livelli
-                    levels = list(anova_df["time"].cat.categories if isinstance(anova_df["time"].dtype, pd.CategoricalDtype) else sorted(anova_df["time"].unique()))
+                    if is_categorical_dtype(anova_df["time"]):
+                        levels = list(anova_df["time"].cat.categories)
+                    else:
+                        levels = sorted(anova_df["time"].unique())
                     rows = []
                     for a, b in itertools.combinations(levels, 2):
                         da = anova_df[anova_df["time"] == a].set_index("id")["y"]
@@ -363,6 +364,9 @@ if model_choice.startswith("ANOVA"):
                         st.info("Confronti non disponibili (campioni troppo piccoli).")
                 else:
                     st.info("Né Pingouin né SciPy disponibili: impossibile calcolare i confronti post-hoc.")
+
+        except Exception as e:
+            st.error(f"Errore AnovaRM: {e}")
 
 # ———————————————————— FRIEDMAN ————————————————————
 elif model_choice.startswith("Friedman"):
@@ -434,9 +438,8 @@ else:
                 ll1, ll0 = float(mdf.llf), float(m0.llf)
                 chi2 = 2 * (ll1 - ll0)
                 df_diff = mdf.df_modelwc - m0.df_modelwc
-                from scipy.stats import chi2 as chi2dist if _has_scipy else (None)
                 if _has_scipy and df_diff > 0:
-                    p_lrt = float(chi2dist.sf(chi2, df=int(df_diff)))
+                    p_lrt = float(sps.chi2.sf(chi2, df=int(df_diff)))
                     st.metric("LRT (tempo vs nullo) — p", fmt_p(p_lrt))
                 else:
                     st.caption(f"LRT non disponibile (df={df_diff}).")
@@ -451,7 +454,10 @@ else:
                         st.dataframe(emms.round(4), use_container_width=True)
                         if _has_scipy:
                             # pairwise sulle emmeans con Holm
-                            levs = list(work["time"].cat.categories if isinstance(work["time"].dtype, pd.CategoricalDtype) else sorted(work["time"].unique()))
+                            if is_categorical_dtype(work["time"]):
+                                levs = list(work["time"].cat.categories)
+                            else:
+                                levs = sorted(work["time"].unique())
                             rows = []
                             for a, b in itertools.combinations(levs, 2):
                                 ya = work.loc[work["time"] == a, "y"].groupby(work["id"]).mean()
@@ -561,7 +567,6 @@ with nav1:
             pass
 with nav2:
     if st.button("➡️ Vai: Modulo successivo", use_container_width=True, key=k("go_next")):
-        # Prova alcune denominazioni possibili del modulo successivo
         for target in [
             "pages/13_📤_Export_Risultati.py",
             "pages/13_🧾_Report_Automatico.py",
