@@ -26,12 +26,10 @@ try:
     import statsmodels.api as sm
     import statsmodels.formula.api as smf
     from statsmodels.stats.outliers_influence import variance_inflation_factor
-    from statsmodels.stats.diagnostic import het_breuschpagan
 except Exception:
     sm = None
     smf = None
     variance_inflation_factor = None
-    het_breuschpagan = None
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Data store centralizzato (+ fallback)
@@ -81,7 +79,7 @@ def k(name: str) -> str:
     return f"{KEY}_{name}"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Helper: formule, label, tabelle, ROC/AUC
+# Helper generali: formule, label, tabelle
 # ──────────────────────────────────────────────────────────────────────────────
 def fq(s: str) -> str:
     """Escape sicuro per Patsy (nomi con spazi/simboli/emoji)."""
@@ -164,13 +162,6 @@ def coef_table_from_fit(fit, or_scale: bool = False) -> pd.DataFrame:
         out[c] = pd.to_numeric(out[c], errors="coerce").round(3)
     return out
 
-def anova_italian(anova_df: pd.DataFrame) -> pd.DataFrame:
-    df = anova_df.rename(columns={"sum_sq": "SQ", "df": "df", "F": "F", "PR(>F)": "p",
-                                  "sum_sq.1": "SQ", "df.1": "df"})
-    for c in ["SQ", "F", "p"]:
-        if c in df.columns: df[c] = pd.to_numeric(df[c], errors="coerce").round(3)
-    return df
-
 def confusion_table_counts_percent(TN, FP, FN, TP) -> pd.DataFrame:
     row0 = TN + FP; row1 = FN + TP
     def cell(count, row_sum):
@@ -180,7 +171,9 @@ def confusion_table_counts_percent(TN, FP, FN, TP) -> pd.DataFrame:
                          "Pred 1": [cell(FP, row0), cell(TP, row1)]},
                         index=["Vera 0", "Vera 1"])
 
-def auc_fast(y_true: np.ndarray, y_score: np.ndarray) -> float:
+# ── ROC helpers (AUC, curva step, smoothing morbido) ─────────────────────────
+def auc_mann_whitney(y_true: np.ndarray, y_score: np.ndarray) -> float:
+    """AUC con U di Mann–Whitney = Pr(score_pos > score_neg)."""
     try:
         from scipy.stats import rankdata
         y_true = np.asarray(y_true).astype(int)
@@ -188,17 +181,18 @@ def auc_fast(y_true: np.ndarray, y_score: np.ndarray) -> float:
         n1 = int((y_true == 1).sum()); n0 = int((y_true == 0).sum())
         if n1 == 0 or n0 == 0: return float("nan")
         ranks = rankdata(y_score)
-        sum_r_pos = float(ranks[y_true == 1].sum())
-        U = sum_r_pos - n1 * (n1 + 1) / 2.0
+        U = float(ranks[y_true == 1].sum()) - n1 * (n1 + 1) / 2.0
         return float(U / (n1 * n0))
     except Exception:
         return float("nan")
 
 def roc_curve_strict(y_true: np.ndarray, y_score: np.ndarray):
+    """ROC corretta con soglie ai valori distinti, tie gestiti; include (0,0) e (1,1)."""
     y_true = np.asarray(y_true).astype(int)
     y_score = np.asarray(y_score).astype(float)
     P = int((y_true == 1).sum()); N = int((y_true == 0).sum())
     if P == 0 or N == 0: return np.array([0.0, 1.0]), np.array([0.0, 1.0])
+
     order = np.argsort(-y_score, kind="mergesort")
     y_sorted = y_true[order]; s_sorted = y_score[order]
     tpr = [0.0]; fpr = [0.0]; tp = 0; fp = 0; i = 0; n = len(y_sorted)
@@ -215,13 +209,66 @@ def roc_curve_strict(y_true: np.ndarray, y_score: np.ndarray):
         tpr.append(1.0); fpr.append(1.0)
     return np.array(fpr, dtype=float), np.array(tpr, dtype=float)
 
-def mcfadden_r2(model_fit) -> float:
+def _uniq_monotone(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Rende FPR unico crescente e TPR non decrescente (max per FPR duplicati)."""
+    df = pd.DataFrame({"x": x, "y": y}).groupby("x", as_index=False)["y"].max().sort_values("x")
+    xx = df["x"].to_numpy()
+    yy = np.maximum.accumulate(df["y"].to_numpy())
+    return xx, yy
+
+def smooth_roc(fpr: np.ndarray, tpr: np.ndarray, grid_points: int = 300) -> tuple[np.ndarray, np.ndarray]:
+    """Smussa la ROC con interpolazione monotòna (PCHIP se disponibile)."""
+    fpr = np.asarray(fpr, float); tpr = np.asarray(tpr, float)
+    pts = np.vstack([[0.0, 0.0], np.vstack([fpr, tpr]).T, [1.0, 1.0]])
+    x, y = _uniq_monotone(pts[:, 0], pts[:, 1])
+    grid = np.linspace(0.0, 1.0, grid_points)
     try:
-        llf = float(model_fit.llf)
-        llnull = float(model_fit.llnull) if hasattr(model_fit, "llnull") else float(model_fit.null_deviance) / -2.0
-        return 1.0 - (llf / llnull)
+        from scipy.interpolate import PchipInterpolator
+        y_s = PchipInterpolator(x, y)(grid)
     except Exception:
-        return float("nan")
+        y_s = np.interp(grid, x, y)
+    y_s = np.clip(y_s, 0.0, 1.0)
+    y_s = np.maximum.accumulate(y_s)
+    return grid, y_s
+
+def make_roc_figure(fpr, tpr, auc_value, sens_at_thr, spec_at_thr, thr_label: str = "",
+                    style: str = "classic", smooth: bool = False):
+    """
+    ROC:
+    - style='classic' → verde, linea piena; style='soft' → rosso, tratteggiata (morbida).
+    - smooth=True → curva smussata monotòna.
+    """
+    if smooth:
+        x_plot, y_plot = smooth_roc(fpr, tpr)
+    else:
+        x_plot, y_plot = _uniq_monotone(np.array(fpr, float), np.array(tpr, float))
+        if x_plot[0] > 0: x_plot = np.insert(x_plot, 0, 0.0); y_plot = np.insert(y_plot, 0, 0.0)
+        if x_plot[-1] < 1: x_plot = np.append(x_plot, 1.0);  y_plot = np.append(y_plot, 1.0)
+
+    if style == "soft":
+        line_color = "#8e1b1b"; line_dash = "dot"; fill_color = "rgba(200,0,0,0.20)"; marker_color = "#8e1b1b"
+    else:
+        line_color = "#2ecc71"; line_dash = None;    fill_color = "rgba(128,128,128,0.35)"; marker_color = "#2ecc71"
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=x_plot, y=y_plot, mode="lines",
+                             line=dict(color=line_color, width=3, dash=line_dash),
+                             fill="tozeroy", fillcolor=fill_color,
+                             name=f"ROC (AUC={auc_value:.3f})"))
+    fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines",
+                             line=dict(color="rgba(0,0,0,0.75)", dash="dash", width=2),
+                             name="No-skill"))
+    fig.add_trace(go.Scatter(x=[1 - spec_at_thr], y=[sens_at_thr], mode="markers",
+                             marker=dict(symbol="x", size=11, color=marker_color),
+                             name=(f"Soglia {thr_label}" if thr_label else "Soglia")))
+    fig.update_layout(template="simple_white", title="Curva ROC",
+                      xaxis_title="FPR (1 − Specificità)", yaxis_title="TPR (Sensibilità)",
+                      legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="left", x=0),
+                      height=420)
+    fig.update_xaxes(range=[0, 1], showline=True, linewidth=2, linecolor="black")
+    fig.update_yaxes(range=[0, 1], showline=True, linewidth=2, linecolor="black",
+                     scaleanchor="x", scaleratio=1)
+    return fig
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Header
@@ -301,15 +348,14 @@ with tab_lin:
                 tbl = coef_table_from_fit(fit, or_scale=False)
                 st.dataframe(tbl, use_container_width=True)
 
-                if show_anova and hasattr(sm, "stats"):
+                if hasattr(sm, "stats") and show_anova:
                     try:
                         an = sm.stats.anova_lm(fit, typ=2)
                         st.markdown("### ANOVA (Type II)")
-                        st.dataframe(anova_italian(an), use_container_width=True)
+                        st.dataframe(an.round(3), use_container_width=True)
                     except Exception as e:
                         st.caption(f"ANOVA non disponibile: {e}")
 
-                # Diagnostica
                 st.markdown("### Diagnostica")
                 resid = np.asarray(fit.resid)
                 fitted = np.asarray(fit.fittedvalues)
@@ -332,7 +378,6 @@ with tab_lin:
                                            xaxis_title="Quantili teorici", yaxis_title="Residui")
                         st.plotly_chart(fig2, use_container_width=True)
 
-                # Metriche con spiegazione
                 st.markdown("### Indicatori di adattamento")
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("R²", f"{fit.rsquared:.3f}")
@@ -342,7 +387,7 @@ with tab_lin:
                 m3.metric("AIC", f"{fit.aic:.1f}")
                 m3.caption("Criterio informativo (più basso è meglio). Penalizza la complessità.")
                 m4.metric("BIC", f"{fit.bic:.1f}")
-                m4.caption("Come AIC ma penalizza di più i modelli complessi (selezione più parsimoniosa).")
+                m4.caption("Come AIC ma penalizza di più i modelli complessi.")
 
             except Exception as e:
                 st.error(f"Errore nella stima OLS: {e}")
@@ -426,8 +471,15 @@ with tab_logit:
             acc = (TP + TN) / max(len(y_true), 1)
             sens = TP / max((TP + FN), 1)
             spec = TN / max((TN + FP), 1)
-            auc = auc_fast(y_true, p_hat)
-            mcfR2 = mcfadden_r2(fit)
+            auc = auc_mann_whitney(y_true, p_hat)
+
+            mcfR2 = None
+            try:
+                llf = float(fit.llf); llnull = float(fit.llnull) if hasattr(fit, "llnull") else None
+                if llnull is not None and llnull != 0:
+                    mcfR2 = 1.0 - (llf / llnull)
+            except Exception:
+                pass
 
             st.markdown("### Matrice di confusione")
             cm_tp = confusion_table_counts_percent(TN, FP, FN, TP)
@@ -437,17 +489,17 @@ with tab_logit:
             st.markdown("### Indicatori di prestazione")
             c1m, c2m, c3m, c4m, c5m = st.columns(5)
             c1m.metric("Accuracy", f"{acc:.3f}")
-            c1m.caption("Quota di classificazioni corrette complessive (dipende dal bilanciamento delle classi).")
+            c1m.caption("Quota di classificazioni corrette complessive (dipende dal bilanciamento).")
             c2m.metric("Sensibilità (TPR)", f"{sens:.3f}")
-            c2m.caption("Pr(Y=1 | Y vero=1): capacità di cogliere i positivi (recall).")
+            c2m.caption("Pr(Y=1 | Y vero=1): capacità di cogliere i positivi.")
             c3m.metric("Specificità (TNR)", f"{spec:.3f}")
             c3m.caption("Pr(Y=0 | Y vero=0): capacità di evitare falsi positivi.")
             c4m.metric("AUC (ROC)", f"{auc:.3f}" if auc == auc else "—")
             c4m.caption("Discriminazione globale: 0.5=casuale; >0.8=ottima; 1=perfetta.")
-            c5m.metric("McFadden R²", f"{mcfR2:.3f}" if mcfR2 == mcfR2 else "—")
-            c5m.caption("Pseudo-R²: 0–1 (0.2–0.4 ≈ ottimo). Confronto tra modelli logit.")
+            c5m.metric("McFadden R²", f"{mcfR2:.3f}" if mcfR2 is not None and mcfR2 == mcfR2 else "—")
+            c5m.caption("Pseudo-R² per modelli logit; utile per confronti tra modelli.")
 
-            # ROC classica e distribuzione p̂ affiancate
+            # ── Grafici: ROC e distribuzione p̂ affiancati ─────────────────────
             if px is not None and go is not None:
                 left_col, right_col = st.columns(2)
 
@@ -455,6 +507,7 @@ with tab_logit:
                     try:
                         fpr, tpr = roc_curve_strict(y_true, p_hat)
                     except Exception:
+                        # fallback grezzo
                         thr_grid = np.unique(np.round(p_hat, 6))[::-1]
                         fpr, tpr = [0.0], [0.0]
                         for t in thr_grid:
@@ -468,27 +521,22 @@ with tab_logit:
                         fpr.append(1.0); tpr.append(1.0)
                         fpr, tpr = np.array(fpr), np.array(tpr)
 
-                    figroc = go.Figure()
-                    figroc.add_trace(go.Scatter(
-                        x=fpr, y=tpr, mode="lines", line_shape="hv",
-                        line=dict(color="#2ecc71", width=3),
-                        fill="tozeroy", fillcolor="rgba(128,128,128,0.35)",
-                        name=f"ROC (AUC={auc:.3f})"
-                    ))
-                    figroc.add_shape(type="line", x0=0, y0=0, x1=1, y1=1,
-                                     line=dict(color="rgba(0,0,0,0.5)", dash="dash"))
-                    figroc.add_trace(go.Scatter(
-                        x=[1 - spec], y=[sens], mode="markers",
-                        marker=dict(symbol="x", size=10, color="#2ecc71"),
-                        name=f"Soglia {thr:.2f}"
-                    ))
-                    figroc.update_layout(template="simple_white", title="Curva ROC",
-                                         xaxis_title="FPR (1 − Specificità)",
-                                         yaxis_title="TPR (Sensibilità)",
-                                         legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="left", x=0))
-                    figroc.update_xaxes(range=[0, 1], showline=True, linewidth=2, linecolor="black")
-                    figroc.update_yaxes(range=[0, 1], showline=True, linewidth=2, linecolor="black",
-                                        scaleanchor="x", scaleratio=1)
+                    opt1, opt2 = st.columns([1.3, 1.7])
+                    with opt1:
+                        roc_smooth = st.checkbox("Andamento morbido (interpolato)", value=True, key=k("log_roc_smooth"))
+                    with opt2:
+                        roc_style = st.selectbox("Stile curva",
+                                                 ["Classico (verde)", "Morbido (rosso)"],
+                                                 index=1 if roc_smooth else 0, key=k("log_roc_style"))
+                    style = "soft" if roc_style.startswith("Morbido") else "classic"
+
+                    figroc = make_roc_figure(
+                        fpr=fpr, tpr=tpr,
+                        auc_value=auc if auc == auc else float("nan"),
+                        sens_at_thr=sens, spec_at_thr=spec,
+                        thr_label=f"{thr:.2f}",
+                        style=style, smooth=roc_smooth
+                    )
                     st.plotly_chart(figroc, use_container_width=True)
 
                 with right_col:
@@ -507,9 +555,10 @@ with tab_logit:
             with st.expander("ℹ️ Come leggere", expanded=False):
                 st.markdown(
                     "- **β/OR**: β è su log-odds; `OR = exp(β)` (CI su scala OR).  \n"
-                    "- **Accuracy** riflette il bilanciamento classi; Sensibilità/Specificità gestiscono i due tipi di errore.  \n"
+                    "- **Accuracy** riflette il bilanciamento delle classi; Sensibilità/Specificità gestiscono i due tipi di errore.  \n"
                     "- **AUC** valuta la discriminazione indipendentemente dalla soglia; **McFadden R²** confronta modelli logit.  \n"
-                    "- Le distribuzioni di **p̂** dovrebbero sovrapporsi poco se il modello discrimina bene."
+                    "- Le distribuzioni di **p̂** dovrebbero sovrapporsi poco se il modello discrimina bene.  \n"
+                    "- **Curva ROC morbida**: interpolazione monotòna per leggibilità; i punti estremi (0,0) e (1,1) sono sempre inclusi."
                 )
 
         except Exception as e:
