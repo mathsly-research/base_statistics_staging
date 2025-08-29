@@ -170,18 +170,54 @@ def residual_plots(fitted, resid, title_prefix=""):
                        xaxis_title="Residuo", yaxis_title="Frequenza")
     return fig1, fig2
 
-def ensure_list(obj):
-    if obj is None:
-        return []
-    if isinstance(obj, (list, tuple)):
-        return list(obj)
-    return [obj]
+def lm_covargs_from_se(se_type: str) -> tuple[str, dict]:
+    cov_type = "unadjusted"; cov_kw = {}
+    if se_type == "HC1 (etero-robusta)":
+        cov_type = "robust"
+    elif se_type == "Cluster per entità":
+        cov_type = "clustered"; cov_kw = {"cluster_entity": True}
+    elif se_type == "Cluster per tempo":
+        cov_type = "clustered"; cov_kw = {"cluster_time": True}
+    elif se_type == "Cluster entità & tempo":
+        cov_type = "clustered"; cov_kw = {"cluster_entity": True, "cluster_time": True}
+    elif se_type == "Driscoll–Kraay (se disponibile)":
+        cov_type = "kernel"; cov_kw = {"kernel": "bartlett", "bandwidth": 3}
+    return cov_type, cov_kw
+
+def sm_covargs_from_se(se_type: str, data: pd.DataFrame, entity_col: str, time_col: str):
+    # Statsmodels: single clustering only
+    if se_type == "HC1 (etero-robusta)":
+        return {"cov_type": "HC1", "cov_kwds": None}
+    elif se_type == "Cluster per entità":
+        return {"cov_type": "cluster", "cov_kwds": {"groups": data[entity_col]}}
+    elif se_type == "Cluster per tempo":
+        return {"cov_type": "cluster", "cov_kwds": {"groups": data[time_col]}}
+    else:
+        return {"cov_type": "nonrobust", "cov_kwds": None}
+
+def se_explanation_block():
+    st.markdown(
+        """
+**Come scegliere gli errori standard (SE)**  
+- **Classici**: assumono omoschedasticità e indipendenza ⇒ *da evitare* nei panel reali.  
+- **HC1 (etero-robusta)**: corregge l’eteroschedasticità ma **non** l’autocorrelazione entro entità/tempo.  
+- **Cluster per entità**: consigliato quando c’è correlazione seriale **entro entità** (caso tipico nei panel).  
+- **Cluster per tempo**: utile quando shock comuni colpiscono **tutte** le entità in un periodo (correlazione cross-section nello stesso t).  
+- **Cluster entità & tempo** *(solo `linearmodels`)*: robusto **simultaneamente** a entrambe le dipendenze (scelta predefinita prudente se disponibile).  
+- **Driscoll–Kraay** *(solo `linearmodels`)*: robusto a eteroschedasticità, autocorrelazione e **dipendenza cross-section**; raccomandato con **T medio-alto** (indicativamente T≥20).
+"""
+    )
+    st.caption(
+        "Regola pratica: se ha dubbi, usi **Cluster per entità**; se sospetta anche shock comuni nel tempo e ha `linearmodels`, usi **Cluster entità & tempo**; "
+        "se **T** è ampio e c’è dipendenza cross-section, consideri **Driscoll–Kraay**."
+    )
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Header e dati
 # ──────────────────────────────────────────────────────────────────────────────
 st.title("🏛️ Panel Analysis (Econometria)")
-st.caption("Pooled OLS, Effetti Fissi (entità/tempo), Effetti Casuali, **Interazioni**, **Difference-in-Differences** con SE robuste (HC1, Cluster 1-vie/2-vie, Driscoll–Kraay) e **Hausman**. Interfaccia guidata.")
+st.caption("Pooled OLS, Effetti Fissi (entità/tempo), Effetti Casuali, Interazioni, Difference-in-Differences, "
+           "SE robuste (HC1, Cluster 1-via/2-vie, Driscoll–Kraay) e Hausman. Interfaccia guidata.")
 
 ensure_initialized()
 DF = get_active(required=True)
@@ -190,10 +226,28 @@ with st.expander("Stato dati", expanded=False):
 if DF is None or DF.empty:
     st.stop()
 
+# ──────────────────────────────────────────────────────────────────────────────
+# 📌 Come impostare correttamente l’analisi — (SEZIONE IN ALTO)
+# ──────────────────────────────────────────────────────────────────────────────
+with st.expander("📌 Come impostare correttamente l’analisi (prima di iniziare)", expanded=True):
+    st.markdown(
+        "- **Identificatori**: verifichi che esistano colonne per **entità (id)** e **tempo (t)**; ogni riga deve essere una coppia (id, t).  \n"
+        "- **Bilanciamento**: un panel *non* deve per forza essere bilanciato; FE/RE funzionano anche con T variabile tra entità.  \n"
+        "- **Scelta del modello**:  \n"
+        "  • **FE** se gli effetti non osservati sono plausibilmente **correlati** con X;  \n"
+        "  • **RE** se tale correlazione è plausibilmente **nulla** (verificare con **Hausman**);  \n"
+        "  • **DiD** se ha un trattamento applicato in un periodo a un sottoinsieme di entità e vuole **ATT**; includa FE entità+tempo.  \n"
+        "- **Errori standard**: scelga SE **cluster per entità** come default prudente; consideri **due-vie** o **Driscoll–Kraay** in presenza di shock comuni e/o dipendenza cross-section.  \n"
+        "- **Controlli**: includa covariate esogene e pertinenti; eviti controlli *post-trattamento* in DiD.  \n"
+        "- **Interazioni**: utili per effetti condizionali (es. X che varia con Z); centri le variabili numeriche per ridurre collinearità.  \n"
+        "- **Scaling**: opzionale (z-score) per confrontare coefficienti su scale diverse e migliorare stabilità numerica."
+    )
+
+# Dati e colonne
 all_cols = list(DF.columns)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# STEP 1 — Struttura panel e variabili
+# STEP 1 — Struttura del panel e variabili
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("### 1) Struttura del panel e variabili")
 
@@ -238,17 +292,16 @@ if drop_na:
 st.markdown("### 2) Interazioni (opzionale)")
 st.session_state.setdefault(k("interactions"), [])
 regressors_current = [c for c in work.columns if c not in {entity_col, time_col, y_col}]
-num_candidates = [c for c in regressors_current if pd.api.types.is_numeric_dtype(work[c])]
 
 ci1, ci2, ci3 = st.columns([1.2, 1.2, 1.0])
 with ci1:
-    ia = st.selectbox("Variabile A", options=regressors_current, key=k("ia"))
+    ia = st.selectbox("Variabile A", options=(regressors_current or ["—"]), key=k("ia"))
 with ci2:
-    ib = st.selectbox("Variabile B", options=[c for c in regressors_current if c != ia], key=k("ib"))
+    ib = st.selectbox("Variabile B", options=([c for c in regressors_current if c != ia] or ["—"]), key=k("ib"))
 with ci3:
     center_int = st.checkbox("Centra variabili numeriche (− media)", value=True, key=k("center"))
 add_int = st.button("➕ Aggiungi interazione A×B", key=k("add_int"))
-if add_int and ia and ib:
+if add_int and ia in work.columns and ib in work.columns:
     a = work[ia]
     b = work[ib]
     if center_int:
@@ -278,14 +331,15 @@ st.markdown("#### Anteprima dati")
 st.dataframe(work.head(10), use_container_width=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# STEP 3 — Specifica modello “standard” (Pooled / FE / RE)
+# STEP 3 — Modello standard (Pooled / FE / RE)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("### 3) Modello standard (Pooled / FE / RE)")
+
 m1, m2, m3 = st.columns([1.2, 1.2, 1.2])
 with m1:
     model_type = st.radio("Tipo di modello", ["Pooled OLS", "Effetti Fissi (FE)", "Effetti Casuali (RE)"], horizontal=False, key=k("model"))
 with m2:
-    fe_entity = st.checkbox("Effetti fissi **entità**", value=True if model_type == "Effetti Fissi (FE)" else False, key=k("fe_e"))
+    fe_entity = st.checkbox("Effetti fissi **entità**", value=(model_type == "Effetti Fissi (FE)"), key=k("fe_e"))
     fe_time = st.checkbox("Effetti fissi **tempo**", value=False, key=k("fe_t"))
 with m3:
     se_type = st.selectbox("Errori standard", options=[
@@ -295,21 +349,36 @@ with m3:
         "Cluster per tempo",
         "Cluster entità & tempo",
         "Driscoll–Kraay (se disponibile)"
-    ], index=1, key=k("se"))
+    ], index=2, key=k("se"))
 
-st.caption(
-    "- FE rimuove **eterogeneità non osservata** fissa per entità/tempo.  \n"
-    "- RE assume effetti casuali **non correlati** con i regressori.  \n"
-    "- Scegliere SE **cluster** per autocorrelazione intra-cluster; **due-vie** se serve (richiede `linearmodels`).  \n"
-    "- **Driscoll–Kraay** per T moderato/alto e dipendenze cross-sezionali."
-)
+# Guida sintetica dinamica sugli SE (in base alla scelta)
+with st.expander("ℹ️ Come scegliere gli errori standard — guida rapida", expanded=True):
+    se_explanation_block()
+    # Suggerimento contestuale
+    hint = ""
+    if se_type == "Classici":
+        hint = "Scelta fragile nei panel: preferisca **Cluster per entità** almeno."
+    elif se_type == "HC1 (etero-robusta)":
+        hint = "Corregge l’eteroschedasticità ma **non** l’autocorrelazione: meglio **Cluster per entità** se sospetta serial correlation."
+    elif se_type == "Cluster per entità":
+        hint = "Scelta **consigliata** nella maggior parte dei panel con autocorrelazione intra-entità."
+    elif se_type == "Cluster per tempo":
+        hint = "Utile con **shock comuni** per periodo; valuti due-vie se possibile."
+    elif se_type == "Cluster entità & tempo":
+        hint = "Robusto a dipendenze **intra-entità e intra-tempo** (richiede `linearmodels`)."
+    elif se_type == "Driscoll–Kraay (se disponibile)":
+        hint = "Robusto a dipendenza cross-section; indicato con **T medio-alto (≈≥20)**."
+    st.info(f"Scelto: **{se_type}** → {hint}")
 
-# Costruzione panel
+# Avvertenze quando la scelta non è supportata dal backend usato
+if not _has_lm and se_type in {"Cluster entità & tempo", "Driscoll–Kraay (se disponibile)"}:
+    st.warning("L’opzione selezionata richiede **linearmodels**. Verrà usata un’alternativa compatibile (statsmodels non supporta due-vie né Driscoll–Kraay).")
+
 if len(regressors) == 0:
     st.warning("Selezionare almeno un regressore/controllo (o creare un'interazione).")
     st.stop()
 
-y = work[y_col]
+# Costruzione panel per linearmodels (se disponibile)
 panel = None
 if _has_lm:
     try:
@@ -323,31 +392,6 @@ if _has_lm:
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("#### Stima e risultati (modello standard)")
 results = {}
-
-def lm_covargs_from_se(se_type: str) -> tuple[str, dict]:
-    cov_type = "unadjusted"; cov_kw = {}
-    if se_type == "HC1 (etero-robusta)":
-        cov_type = "robust"
-    elif se_type == "Cluster per entità":
-        cov_type = "clustered"; cov_kw = {"cluster_entity": True}
-    elif se_type == "Cluster per tempo":
-        cov_type = "clustered"; cov_kw = {"cluster_time": True}
-    elif se_type == "Cluster entità & tempo":
-        cov_type = "clustered"; cov_kw = {"cluster_entity": True, "cluster_time": True}
-    elif se_type == "Driscoll–Kraay (se disponibile)":
-        cov_type = "kernel"; cov_kw = {"kernel": "bartlett", "bandwidth": 3}
-    return cov_type, cov_kw
-
-def sm_covargs_from_se(se_type: str, data: pd.DataFrame):
-    # Statsmodels: single clustering only
-    if se_type == "HC1 (etero-robusta)":
-        return {"cov_type": "HC1", "cov_kwds": None}
-    elif se_type == "Cluster per entità":
-        return {"cov_type": "cluster", "cov_kwds": {"groups": data[entity_col]}}
-    elif se_type == "Cluster per tempo":
-        return {"cov_type": "cluster", "cov_kwds": {"groups": data[time_col]}}
-    else:
-        return {"cov_type": "nonrobust", "cov_kwds": None}
 
 def show_lm_table(res, title: str):
     st.markdown(f"**{title}**")
@@ -390,7 +434,6 @@ def show_lm_table(res, title: str):
     with m3: st.metric("N osservazioni", f"{nobs}")
     with m4: st.metric("AIC", f"{aic:.1f}" if aic == aic else "—")
 
-# Stima
 try:
     if model_type == "Pooled OLS":
         if _has_lm:
@@ -404,7 +447,7 @@ try:
         elif _has_sm:
             formula = y_col + " ~ " + " + ".join(regressors)
             data = work.copy()
-            kw = sm_covargs_from_se(se_type, data)
+            kw = sm_covargs_from_se(se_type, data, entity_col, time_col)
             model = smf.ols(formula, data=data).fit(cov_type=kw["cov_type"], cov_kwds=kw["cov_kwds"])
             results["Pooled OLS"] = model
         else:
@@ -424,13 +467,13 @@ try:
             rhs = " + ".join([p for p in pieces if p]) if pieces else "1"
             formula = f"{y_col} ~ {rhs}"
             data = work.copy()
-            kw = sm_covargs_from_se(se_type, data)
+            kw = sm_covargs_from_se(se_type, data, entity_col, time_col)
             model = smf.ols(formula, data=data).fit(cov_type=kw["cov_type"], cov_kwds=kw["cov_kwds"])
             results["FE"] = model
         else:
             st.error("Né linearmodels né statsmodels disponibili per FE.")
 
-    else:  # RE
+    else:  # Effetti Casuali (RE)
         if _has_lm:
             Y = panel[y_col]; X = panel[regressors]
             cov_type, cov_kw = lm_covargs_from_se(se_type)
@@ -453,13 +496,13 @@ with st.expander("📝 Interpretazione (modello standard)"):
         "- **Coefficienti**: effetto marginale medio di ciascun regressore su **y**, a parità degli altri.  \n"
         "- **p-value**: < α ⇒ evidenza di effetto diverso da 0.  \n"
         "- **FE**: interpretazione **within** (variazione intra-entità nel tempo).  \n"
-        "- **RE**: efficiente se l’effetto casuale è **non correlato** con X; altrimenti preferire **FE**.  \n"
+        "- **RE**: più efficiente se l’effetto casuale è **non correlato** con X; altrimenti preferire **FE**.  \n"
         "- **R² within**: capacità esplicativa sulle variazioni **entro entità** (rilevante per FE).  \n"
-        "- **SE cluster**: correggono per eteroschedasticità/autocorrelazione intra-cluster."
+        "- **SE cluster**: correggono per eteroschedasticità/autocorrelazione; due-vie per robustezza a shock comuni nel tempo."
     )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# STEP 4 — Hausman test (FE vs RE) con linearmodels
+# STEP 4 — Hausman test (FE vs RE)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("### 4) Hausman test (FE vs RE)")
 if _has_lm:
@@ -485,13 +528,13 @@ st.markdown("### 5) Difference-in-Differences (DiD)")
 did_enable = st.checkbox("Abilita analisi DiD", value=False, key=k("did_on"))
 
 if did_enable:
+    all_cols = list(DF.columns)
     dc1, dc2 = st.columns([1.2, 1.8])
     with dc1:
         treat_col = st.selectbox("Colonna **Treatment** (entità: 0/1 o categoria)", options=[c for c in all_cols if c not in {entity_col, time_col, y_col}], key=k("treat"))
         treat_is_binary = st.checkbox("Treatment già binario 0/1", value=True, key=k("treat_bin"))
         treat_level = None
         if not treat_is_binary:
-            # Se categoriale, scelgo il livello 'trattato'
             lvl = sorted(DF[treat_col].dropna().astype(str).unique().tolist())
             treat_level = st.selectbox("Valore che indica **trattato**", options=lvl, key=k("treat_lvl"))
     with dc2:
@@ -501,28 +544,25 @@ if did_enable:
             post_cut = None
         else:
             post_col = None
-            # Definizione soglia in base al tipo di 'time'
             tvals = DF[time_col]
             if pd.api.types.is_numeric_dtype(tvals):
                 tmin, tmax = float(np.nanmin(tvals)), float(np.nanmax(tvals))
-                post_cut = st.slider("Soglia tempo per **Post** (t >= soglia ⇒ Post=1)", min_value=float(tmin), max_value=float(tmax), value=float(np.median(tvals)))
+                post_cut = st.slider("Soglia tempo per **Post** (t ≥ soglia ⇒ Post=1)", min_value=float(tmin), max_value=float(tmax), value=float(np.nanmedian(tvals)))
             elif pd.api.types.is_datetime64_any_dtype(tvals):
                 tmin, tmax = pd.to_datetime(tvals.min()), pd.to_datetime(tvals.max())
-                post_cut = st.date_input("Data soglia per **Post** (t >= soglia ⇒ Post=1)", value=tmin if pd.isna(tmin) else tmin)
+                post_cut = st.date_input("Data soglia per **Post** (t ≥ soglia ⇒ Post=1)", value=(tmin if pd.isna(tmin) else tmin))
             else:
                 levels = sorted(DF[time_col].dropna().astype(str).unique().tolist())
                 post_cut = st.selectbox("Livello soglia per **Post** (≥ livello ⇒ Post=1)", options=levels, index=max(0, len(levels)//2))
 
     # Costruzione dataset DiD
     did_df = DF[[entity_col, time_col, y_col] + regressors].copy()
-    # Treatment a livello entità (merge se serve)
     if treat_is_binary:
         treat_series = DF.groupby(entity_col)[treat_col].transform(lambda s: int(pd.to_numeric(s, errors="coerce").fillna(0).iloc[0]))
     else:
         treat_series = (DF[treat_col].astype(str) == str(treat_level)).astype(int)
     did_df["TREAT"] = treat_series.astype(int)
 
-    # Post a livello tempo
     if post_mode == "Colonna esistente (0/1)":
         did_df["POST"] = pd.to_numeric(DF[post_col], errors="coerce").fillna(0).astype(int)
     else:
@@ -531,7 +571,6 @@ if did_enable:
         elif pd.api.types.is_datetime64_any_dtype(DF[time_col]):
             did_df["POST"] = (pd.to_datetime(DF[time_col]) >= pd.to_datetime(post_cut)).astype(int)
         else:
-            # ordina i livelli e marca quelli >= soglia
             levels = sorted(DF[time_col].dropna().astype(str).unique().tolist())
             order = {lev: i for i, lev in enumerate(levels)}
             thresh = order.get(str(post_cut), 0)
@@ -539,11 +578,7 @@ if did_enable:
 
     did_df["DID"] = did_df["TREAT"] * did_df["POST"]
 
-    # Aggiungi eventualmente i controlli/dummies/standardizzazione usati in 'work'
-    cols_keep = [entity_col, time_col, y_col, "TREAT", "POST", "DID"] + [c for c in regressors if c not in {"TREAT", "POST", "DID"}]
-    did_df = did_df[cols_keep].copy()
-
-    # Stima DiD: FE entità + tempo di default
+    # Stima DiD: FE entità + tempo
     st.markdown("#### Stima DiD (FE entità+tempo)")
     try:
         if _has_lm:
@@ -553,34 +588,22 @@ if did_enable:
             cov_type, cov_kw = lm_covargs_from_se(se_type)
             mod_did = PanelOLS(Y, X, entity_effects=True, time_effects=True)
             res_did = mod_did.fit(cov_type=cov_type, **cov_kw)
-            # Tabella
             st.dataframe(pd.DataFrame({
                 "coef": res_did.params,
                 "se": res_did.std_errors,
                 "t": res_did.tstats,
                 "p": res_did.pvalues
             }).round(4), use_container_width=True)
-            # Evidenzia DID
             did_coef = float(res_did.params.get("DID", np.nan))
             did_se = float(res_did.std_errors.get("DID", np.nan))
-            if hasattr(res_did, "conf_int"):
-                try:
-                    ci = res_did.conf_int().loc["DID"].values
-                    ci_low, ci_high = float(ci[0]), float(ci[1])
-                except Exception:
-                    ci_low = did_coef - 1.96 * did_se if did_se == did_se else np.nan
-                    ci_high = did_coef + 1.96 * did_se if did_se == did_se else np.nan
-            else:
-                ci_low = did_coef - 1.96 * did_se if did_se == did_se else np.nan
-                ci_high = did_coef + 1.96 * did_se if did_se == did_se else np.nan
+            ci_low = did_coef - 1.96 * did_se if did_se == did_se else np.nan
+            ci_high = did_coef + 1.96 * did_se if did_se == did_se else np.nan
             c1, c2, c3 = st.columns(3)
             c1.metric("DiD (TREAT×POST)", f"{did_coef:.4f}" if did_coef == did_coef else "—")
             c2.metric("IC 95%", f"[{ci_low:.4f}, {ci_high:.4f}]" if ci_low == ci_low and ci_high == ci_high else "—")
             c3.metric("p-value", fmt_p(float(res_did.pvalues.get('DID', np.nan))))
             did_res = res_did
         elif _has_sm:
-            # FE con dummies entità+tempo
-            # Costruiamo formula esplicita
             rhs = "DID + TREAT + POST" + (" + " + " + ".join([c for c in regressors if c not in {'TREAT','POST','DID'}]) if regressors else "")
             formula = f"{y_col} ~ {rhs} + C({entity_col}) + C({time_col})"
             model = smf.ols(formula, data=did_df).fit(cov_type="HC1")
@@ -603,15 +626,15 @@ if did_enable:
 
     with st.expander("📝 Come interpretare la DiD", expanded=True):
         st.markdown(
-            "- Il coefficiente **DID = TREAT×POST** stima l’**effetto medio del trattamento sui trattati (ATT)** sotto l’ipotesi di **trend paralleli**.  \n"
+            "- Il coefficiente **DID = TREAT×POST** stima l’**ATT** sotto l’ipotesi di **trend paralleli**.  \n"
             "- **Segno**: positivo ⇒ aumento di **y** dovuto al trattamento; negativo ⇒ diminuzione.  \n"
-            "- **IC 95% e p-value**: indicano precisione ed evidenza statistica dell’effetto.  \n"
-            "- La presenza di FE **entità** e **tempo** controlla, rispettivamente, per eterogeneità invariante e shock comuni ai periodi.  \n"
-            "- Usare **SE cluster** per entità (spesso raccomandato) o **due-vie** (entità & tempo) per maggiore robustezza."
+            "- **IC 95% e p-value**: misurano precisione ed evidenza statistica.  \n"
+            "- FE **entità** e **tempo** controllano eterogeneità invariante e shock comuni.  \n"
+            "- Preferire **SE cluster per entità** o **due-vie** per robustezza."
         )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Diagnostica (residui) per un modello a scelta
+# Diagnostica (residui)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("### 6) Diagnostica grafica")
 diag_opts = list(results.keys())
@@ -633,20 +656,14 @@ if sel_model and go is not None:
         st.info(f"Diagnostica non disponibile: {e}")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Guide pratiche: come impostare
+# Checklist di impostazione (richiamo finale opzionale)
 # ──────────────────────────────────────────────────────────────────────────────
-with st.expander("📌 Come impostare correttamente l’analisi (checklist)"):
+with st.expander("Checklist rapida (richiamo)"):
     st.markdown(
-        "- **Identificatori**: definire chiaramente **entità** (id) e **tempo**; controllare che ogni riga corrisponda a (id,t).  \n"
-        "- **Bilanciamento**: un panel non bilanciato è ammesso, ma per **AnovaRM** no; per panel FE/RE non è un problema.  \n"
-        "- **Scelta modello**:  \n"
-        "  • **FE** se sospetta correlazione tra effetti non osservati e regressori;  \n"
-        "  • **RE** se tale correlazione è plausibilmente nulla (**Hausman** aiuta a decidere);  \n"
-        "  • **DiD** se esiste un **trattamento** applicato in un certo **periodo** solo ad alcune entità.  \n"
-        "- **SE**: preferire **cluster per entità** (o **due-vie** con `linearmodels`) in presenza di autocorrelazione intra-entità e shock comuni nel tempo.  \n"
-        "- **Interazioni**: utili per stimare effetti condizionali (es. impatto di X che varia con Z). Abilitare l’opzione **centra** per ridurre collinearità.  \n"
-        "- **Scaling**: opzionale (z-score) per migliorare la stabilità numerica e l’interpretabilità quando le scale differiscono molto.  \n"
-        "- **Controlli**: includere solo covariate plausibilmente **esogene** rispetto al trattamento (in DiD per non violare i trend paralleli)."
+        "- Definisca chiaramente **id** e **t**; una riga = una coppia (id,t).  \n"
+        "- Scegliere tra **FE** (se correlazione con X) e **RE** (se no; confermare con **Hausman**).  \n"
+        "- Usare **SE cluster per entità** come default; valutare **due-vie** o **Driscoll–Kraay** secondo le dipendenze.  \n"
+        "- In **DiD**: FE entità+tempo, trend paralleli, nessun controllo post-trattamento."
     )
 
 # ──────────────────────────────────────────────────────────────────────────────
