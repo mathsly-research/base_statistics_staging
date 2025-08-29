@@ -35,7 +35,7 @@ if st.session_state.df is None:
     c1, c2 = st.columns([1,1])
     with c1:
         st.markdown("### 1) Carica il suo dataset")
-        st.page_link("pages/1_📂_Upload_Dataset.py", label="➡️ Vai a **Upload Dataset**", icon="📂")
+        st.page_link("pages/0_📂_Upload_Dataset.py", label="➡️ Vai a **Upload Dataset**", icon="📂")
     with c2:
         st.markdown("### 2) Prova con un dataset di esempio")
         if st.button("Carica dataset di esempio (clinico)"):
@@ -59,5 +59,5 @@ else:
 
     st.markdown("### Prosegua con:")
     st.page_link("pages/2_📈_Descriptive_Statistics.py", label="Descrizione del campione", icon="📈")
-    st.page_link("pages/4_📊_Explore_Distributions.py", label="Esplora distribuzioni", icon="📊")
+    st.page_link("pages/3_📊_Explore_Distributions.py", label="Esplora distribuzioni", icon="📊")
     st.page_link("pages/5_🧪_Statistical_Tests.py", label="Test statistici", icon="🧪")
