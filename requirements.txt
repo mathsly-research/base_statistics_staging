@@ -14,5 +14,4 @@ scikit-learn
 lifelines
 linearmodels
 pmdarima
-semopy
-graphviz
+
