@@ -2,14 +2,15 @@
 # pages/16_🧩_SEM_Structural_Equation_Modeling.py
 from __future__ import annotations
 
-import os, re
+import os
+import re
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 # Plotly (per tabelle/grafici semplici)
 try:
-    import plotly.graph_objects as go
+    import plotly.graph_objects as go  # non indispensabile qui, ma utile per estensioni
 except Exception:
     go = None
 
@@ -83,9 +84,11 @@ def _norm(s: str) -> str:
 
 def safe_switch_by_tokens(primary_candidates: list[str], fallback_tokens: list[str]):
     files = _list_pages()
+    # match esatto
     for cand in primary_candidates or []:
         if cand in files:
             st.switch_page(os.path.join("pages", cand)); return
+    # match fuzzy
     toks = [_norm(t) for t in fallback_tokens]
     for f in files:
         nf = _norm(f)
@@ -111,9 +114,8 @@ def cronbach_alpha(df: pd.DataFrame) -> float | None:
 
 SAFE_RE = re.compile(r"[^A-Za-z0-9_]")
 def safe_token(name: str) -> str:
-    """Converte un nome (latente/variabile) in un token sicuro per la sintassi."""
+    """Converte un nome (latente/variabile) in token sicuro per la sintassi."""
     if name is None: name = ""
-    # sostituisco spazi/simboli con underscore e rimuovo duplicati di underscore
     tok = SAFE_RE.sub("_", str(name)).strip("_")
     if tok == "": tok = "v"
     return tok
@@ -142,7 +144,6 @@ def lavaan_syntax_from_builder(
     id_mode: str, rename_map: dict[str, str]
 ) -> tuple[str, dict]:
     """Genera sintassi e mappa latenti {lat_originale->lat_token}."""
-    # latenti: token sicuri e univoci
     lat_orig = [comp["name"] for comp in latents]
     lat_tok = unique_tokens([safe_token(n) for n in lat_orig])
     lat_map = dict(zip(lat_orig, lat_tok))
@@ -153,7 +154,7 @@ def lavaan_syntax_from_builder(
         name_o = comp["name"]
         name_t = lat_map[name_o]
         inds_o = comp["indicators"]
-        if not inds_o: 
+        if not inds_o:
             continue
         inds_t = [rename_map.get(i, safe_token(i)) for i in inds_o]
         lines.append(f"{name_t} =~ " + " + ".join(inds_t))
@@ -164,13 +165,12 @@ def lavaan_syntax_from_builder(
     dep_to_preds: dict[str, list[str]] = {}
     for r in regressions or []:
         y_o = r.get("y"); xs_o = r.get("X") or []
-        if not y_o or not xs_o: 
+        if not y_o or not xs_o:
             continue
         y_t = lat_map.get(y_o, rename_map.get(y_o, safe_token(y_o)))
         xs_t = [lat_map.get(x, rename_map.get(x, safe_token(x))) for x in xs_o]
         dep_to_preds.setdefault(y_t, []).extend(xs_t)
     for y_t, xs_t in dep_to_preds.items():
-        # rimuovo duplicati mantenendo ordine
         seen = set(); xs_u = [x for x in xs_t if not (x in seen or seen.add(x))]
         lines.append(f"{y_t} ~ " + " + ".join(xs_u))
 
@@ -225,7 +225,7 @@ with c2:
 with c3:
     standardize = st.checkbox("Standardizza variabili (z-score) prima della stima", value=False, key=k("z"))
 
-# Prepara sorgente dati (eventuale z-score)
+# Sorgente dati (eventuale z-score)
 data_source = DF.copy()
 if standardize:
     for c in num_cols:
@@ -235,23 +235,27 @@ if standardize:
             data_source[c] = (s - mu) / sd
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2) Modello di misura — Aggiunta costrutti con validazioni
+# 2) Modello di misura — Reset sicuro + Aggiunta costrutti con validazioni
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("### 2) Modello di **misura** (CFA)")
 st.session_state.setdefault(k("latents"), [])
+
+# --- Reset sicuro del form "aggiungi costrutto": eseguito PRIMA di creare i widget ---
+if st.session_state.get(k("reset_lat_form"), False):
+    for field in [k("lat_name"), k("lat_inds")]:
+        st.session_state.pop(field, None)
+    st.session_state[k("reset_lat_form")] = False
 
 with st.container():
     cL1, cL2, cL3 = st.columns([1.0, 2.0, 0.7])
     with cL1:
         lat_name = st.text_input("Nome costrutto latente", value="", placeholder="es. Soddisfazione", key=k("lat_name"))
     with cL2:
-        # indicatori SOLO numerici (evita errori a runtime)
         lat_inds = st.multiselect("Indicatori osservati (numerici)", options=num_cols, key=k("lat_inds"))
     with cL3:
         add_lat = st.button("➕ Aggiungi costrutto", key=k("add_lat"))
 
     if add_lat:
-        # VALIDAZIONI ROBUSTE
         name = (lat_name or "").strip()
         if not name:
             st.error("Specificare un **nome** per il costrutto.")
@@ -260,7 +264,6 @@ with st.container():
         elif not lat_inds or len(lat_inds) < 2:
             st.error("Selezionare **almeno due indicatori** per il costrutto.")
         else:
-            # Verifica convertibilità numerica (evita crash più avanti)
             bad = []
             for v in lat_inds:
                 s = pd.to_numeric(data_source[v], errors="coerce")
@@ -271,9 +274,8 @@ with st.container():
             else:
                 st.session_state[k("latents")].append({"name": name, "indicators": lat_inds})
                 st.success(f"Aggiunto costrutto **{name}**: {', '.join(lat_inds)}")
-                # pulizia del form per evitare riuso inconsapevole
-                st.session_state[k("lat_name")] = ""
-                st.session_state[k("lat_inds")] = []
+                # Flag di reset (non scrivo direttamente nelle chiavi dei widget in questo run)
+                st.session_state[k("reset_lat_form")] = True
                 st.rerun()
 
 # Elenco costrutti
@@ -281,7 +283,7 @@ if st.session_state[k("latents")]:
     st.markdown("**Costrutti definiti**")
     for i, comp in enumerate(st.session_state[k("latents")], start=1):
         st.write(f"{i}. **{comp['name']}** ← {', '.join(comp['indicators'])}")
-    cA, cB = st.columns([1,1])
+    cA, cB = st.columns([1, 1])
     with cA:
         if st.button("🗑️ Rimuovi ultimo costrutto", key=k("pop_lat")):
             if st.session_state[k("latents")]:
@@ -297,6 +299,18 @@ if st.session_state[k("latents")]:
 # ──────────────────────────────────────────────────────────────────────────────
 regressions: list[dict] = st.session_state.setdefault(k("regs"), [])
 covs: list[tuple[str, str]] = st.session_state.setdefault(k("covs"), [])
+
+# Reset sicuro form relazione
+if st.session_state.get(k("reset_reg_form"), False):
+    for field in [k("dep"), k("preds")]:
+        st.session_state.pop(field, None)
+    st.session_state[k("reset_reg_form")] = False
+
+# Reset sicuro form covarianza
+if st.session_state.get(k("reset_cov_form"), False):
+    for field in [k("cov_a"), k("cov_b")]:
+        st.session_state.pop(field, None)
+    st.session_state[k("reset_cov_form")] = False
 
 if analysis_type.startswith("SEM"):
     st.markdown("### 3) Modello **strutturale**")
@@ -319,14 +333,14 @@ if analysis_type.startswith("SEM"):
             else:
                 regressions.append({"y": dep, "X": preds})
                 st.success(f"Aggiunta relazione **{dep} ~ {' + '.join(preds)}**")
-                st.session_state[k("preds")] = []
+                st.session_state[k("reset_reg_form")] = True
                 st.rerun()
 
     if regressions:
         st.markdown("**Relazioni strutturali:**")
         for i, r in enumerate(regressions, start=1):
             st.write(f"{i}. {r['y']} ~ {', '.join(r['X'])}")
-        c1, c2 = st.columns([1,1])
+        c1, c2 = st.columns([1, 1])
         with c1:
             if st.button("🗑️ Rimuovi ultima relazione", key=k("pop_reg")):
                 if st.session_state[k("regs")]:
@@ -351,6 +365,7 @@ if analysis_type.startswith("SEM"):
             else:
                 covs.append((a, b))
                 st.success(f"Aggiunta covarianza **{a} ~~ {b}**")
+                st.session_state[k("reset_cov_form")] = True
                 st.rerun()
         if covs:
             st.caption("Covarianze definite: " + "; ".join([f"{x} ~~ {y}" for x, y in covs]))
@@ -407,7 +422,7 @@ st.markdown("**Anteprima dati usati (complete-case)**")
 st.dataframe(work.head(10), width="stretch")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5) Affidabilità (α) sui costrutti
+# 5) Affidabilità (Cronbach α)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("### 5) Affidabilità (Cronbach α)")
 rel_rows = []
@@ -460,14 +475,13 @@ try:
     # Mappa inversa per mostrare nomi originali
     inv_map = {v: k for k, v in rename_map.items()}
     inv_lat = {v: k for k, v in lat_map.items()}
-
     def backname(x: str) -> str:
         return inv_lat.get(x, inv_map.get(x, x))
 
     if "op" in est_df.columns:
         loadings = est_df[est_df["op"] == "=~"].copy()
-        regress = est_df[est_df["op"] == "~"].copy()
-        covars  = est_df[est_df["op"] == "~~"].copy()
+        regress  = est_df[est_df["op"] == "~"].copy()
+        covars   = est_df[est_df["op"] == "~~"].copy()
 
         val_col = "Est" if "Est" in est_df.columns else ("Estimate" if "Estimate" in est_df.columns else None)
         se_col  = "SE" if "SE" in est_df.columns else None
@@ -492,7 +506,6 @@ try:
             C["Var A"] = C["lval"].map(backname)
             C["Var B"] = C["rval"].map(backname)
             pretty_table(C[["Var A","Var B", val_col]].rename(columns={val_col:"Cov"}).round(4), "Covarianze stimate")
-
     else:
         pretty_table(est_df.round(4), "Stime dei parametri")
 
@@ -537,9 +550,9 @@ except Exception as e:
 with st.expander("📝 Come leggere i risultati", expanded=True):
     st.markdown(
         "- **Loadings (λ)**: ≥0.5–0.7 indicano indicatori forti; p piccoli ⇒ loading ≠ 0.  \n"
-        "- **Affidabilità**: **α ≥ 0.70**; con soluzione standardizzata si possono calcolare **CR** e **AVE** (estendibile).  \n"
+        "- **Affidabilità**: **α ≥ 0.70**; con soluzione standardizzata si possono calcolare **CR** e **AVE**.  \n"
         "- **Regressioni (β)**: effetto diretto sul costrutto/variabile endogena; la versione **standardizzata** è più leggibile.  \n"
-        "- **Fit globale**: CFI/TLI alti, RMSEA/SRMR bassi; giudizio sempre contestualizzato al modello e ai dati."
+        "- **Fit globale**: CFI/TLI alti, RMSEA/SRMR bassi; giudizio sempre contestualizzato a teoria e dati."
     )
 
 # ──────────────────────────────────────────────────────────────────────────────
