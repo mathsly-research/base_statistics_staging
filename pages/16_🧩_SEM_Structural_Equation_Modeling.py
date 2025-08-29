@@ -8,9 +8,9 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# Plotly (per tabelle/grafici semplici)
+# Plotly (per tabelle/grafici e fallback del diagramma)
 try:
-    import plotly.graph_objects as go  # non indispensabile qui, ma utile per estensioni
+    import plotly.graph_objects as go
 except Exception:
     go = None
 
@@ -18,7 +18,7 @@ except Exception:
 try:
     from semopy import Model, calc_stats
     try:
-        from semopy import semplot  # diagramma (se disponibile)
+        from semopy import semplot  # diagramma (richiede binario graphviz/dot)
         _has_semplot = True
     except Exception:
         _has_semplot = False
@@ -37,7 +37,7 @@ def k(x: str) -> str:
     return f"{KEY}_{x}"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Data store (coerente con gli altri moduli)
+# Data store (coerente con altri moduli)
 # ──────────────────────────────────────────────────────────────────────────────
 try:
     from data_store import ensure_initialized, get_active, stamp_meta
@@ -71,7 +71,7 @@ ensure_initialized()
 DF = get_active(required=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Helper UI e navigazione sicura (evita PageNotFound se i nomi cambiano)
+# Helper UI e navigazione sicura (evita PageNotFound su file rinominati)
 # ──────────────────────────────────────────────────────────────────────────────
 def _list_pages():
     try:
@@ -188,10 +188,98 @@ def pretty_table(df: pd.DataFrame, title: str):
     st.dataframe(df, width="stretch")
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Fallback Plotly per il diagramma SEM (senza Graphviz)
+# ──────────────────────────────────────────────────────────────────────────────
+def draw_sem_plotly(latents_config: list[dict], regressions: list[dict] | None = None):
+    """Disegna un diagramma SEM basilare con Plotly (niente binario 'dot' richiesto)."""
+    if go is None or not latents_config:
+        return None
+
+    lat_names = [c["name"] for c in latents_config]
+    n_lat = len(lat_names)
+    if n_lat == 0:
+        return None
+
+    # Coordinate normalizzate (0..1)
+    xs, ys = {}, {}
+    # Latenti su riga alta
+    for i, L in enumerate(lat_names):
+        xs[L] = (i + 1) / (n_lat + 1)
+        ys[L] = 0.8
+
+    # Indicatori su riga bassa, sotto ogni latente
+    obs_nodes = []
+    for comp in latents_config:
+        L = comp["name"]
+        inds = comp.get("indicators", [])
+        k = len(inds)
+        if k == 0:
+            continue
+        base_x = xs[L]
+        if k == 1:
+            positions = [base_x]
+        else:
+            span = 0.20  # larghezza del gruppo indicatori
+            positions = np.linspace(base_x - span / 2, base_x + span / 2, k)
+        for j, ind in enumerate(inds):
+            xs[ind] = float(positions[j])
+            ys[ind] = 0.35
+            obs_nodes.append(ind)
+
+    # Edges: loadings
+    edge_x, edge_y = [], []
+    for comp in latents_config:
+        L = comp["name"]
+        for ind in comp.get("indicators", []):
+            if L in xs and ind in xs:
+                edge_x += [xs[L], xs[ind], None]
+                edge_y += [ys[L], ys[ind], None]
+
+    fig = go.Figure()
+    # Linee dei loadings
+    fig.add_trace(go.Scatter(x=edge_x, y=edge_y, mode="lines", hoverinfo="none", name="Loadings"))
+
+    # Nodi latenti
+    fig.add_trace(go.Scatter(
+        x=[xs[L] for L in lat_names], y=[ys[L] for L in lat_names],
+        mode="markers+text", marker=dict(size=26, symbol="circle-open"),
+        text=lat_names, textposition="top center", name="Latenti"
+    ))
+
+    # Nodi indicatori
+    if obs_nodes:
+        fig.add_trace(go.Scatter(
+            x=[xs[o] for o in obs_nodes], y=[ys[o] for o in obs_nodes],
+            mode="markers+text", marker=dict(size=16),
+            text=obs_nodes, textposition="bottom center", name="Indicatori"
+        ))
+
+    # Relazioni strutturali (frecce)
+    if regressions:
+        for r in regressions:
+            y_dep = r.get("y")
+            for x_src in (r.get("X") or []):
+                if x_src in xs and y_dep in xs:
+                    fig.add_annotation(
+                        x=xs[y_dep], y=ys[y_dep], ax=xs[x_src], ay=ys[x_src],
+                        xref="x", yref="y", axref="x", ayref="y",
+                        showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=1
+                    )
+
+    fig.update_xaxes(visible=False, range=[0, 1])
+    fig.update_yaxes(visible=False, range=[0, 1])
+    fig.update_layout(
+        title="Diagramma SEM (fallback Plotly)",
+        height=520, margin=dict(l=10, r=10, t=60, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5)
+    )
+    return fig
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Header
 # ──────────────────────────────────────────────────────────────────────────────
 st.title("🧩 Structural Equation Modeling (SEM)")
-st.caption("CFA/SEM con validazioni robuste all’inserimento dei costrutti, sanitizzazione automatica dei nomi, indici di fit e affidabilità.")
+st.caption("CFA/SEM con validazioni robuste all’inserimento dei costrutti, sanitizzazione automatica dei nomi, indici di fit e diagramma con fallback.")
 
 with st.expander("Stato dati", expanded=False):
     stamp_meta()
@@ -240,7 +328,7 @@ if standardize:
 st.markdown("### 2) Modello di **misura** (CFA)")
 st.session_state.setdefault(k("latents"), [])
 
-# --- Reset sicuro del form "aggiungi costrutto": eseguito PRIMA di creare i widget ---
+# Reset sicuro del form (prima di creare i widget)
 if st.session_state.get(k("reset_lat_form"), False):
     for field in [k("lat_name"), k("lat_inds")]:
         st.session_state.pop(field, None)
@@ -274,7 +362,6 @@ with st.container():
             else:
                 st.session_state[k("latents")].append({"name": name, "indicators": lat_inds})
                 st.success(f"Aggiunto costrutto **{name}**: {', '.join(lat_inds)}")
-                # Flag di reset (non scrivo direttamente nelle chiavi dei widget in questo run)
                 st.session_state[k("reset_lat_form")] = True
                 st.rerun()
 
@@ -374,7 +461,7 @@ if analysis_type.startswith("SEM"):
                 st.rerun()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4) Sintassi del modello (con sanitizzazione) e dati
+# 4) Sintassi del modello (sanitizzata) e dati
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("### 4) Sintassi del modello e dati")
 
@@ -397,7 +484,7 @@ if st.session_state[k("covs")]:
 
 cols_used = list(cols_used)
 
-# Mappa di rinomina osservate → token sicuri
+# Mappa osservate → token sicuri
 rename_map = build_rename_map(cols_used)
 
 # Sintassi lavaan-like con latenti/variabili sanitizzate
@@ -433,7 +520,7 @@ for comp in st.session_state[k("latents")]:
 pretty_table(pd.DataFrame(rel_rows), "Affidabilità di base")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6) Stima SEM con semopy (con fallback messaggi chiari)
+# 6) Stima SEM con semopy (con fallback del diagramma)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("### 6) Stima del modello e risultati")
 
@@ -472,7 +559,7 @@ try:
     except Exception:
         fit = pd.DataFrame({"metric": [], "value": []})
 
-    # Mappa inversa per mostrare nomi originali
+    # Mappa inversa per visualizzare nomi originali
     inv_map = {v: k for k, v in rename_map.items()}
     inv_lat = {v: k for k, v in lat_map.items()}
     def backname(x: str) -> str:
@@ -529,16 +616,26 @@ try:
     with c4: st.metric("RMSEA", f"{rmsea:.3f}" if rmsea==rmsea else "—")
     st.caption("Regole pratiche: CFI/TLI ≥ 0.90–0.95; RMSEA ≤ 0.06–0.08; SRMR ≤ 0.08.")
 
+    # ── Diagramma del modello: Graphviz se disponibile, altrimenti fallback Plotly
     with st.expander("Diagramma del modello"):
+        used_latents = st.session_state.get(k("latents"), [])
+        tried_graphviz = False
         if _has_semplot:
             try:
                 out_path = os.path.join("/tmp", "sem_diagram.png")
-                semplot(model, out_path)
-                st.image(out_path, caption="Schema SEM generato", width="stretch")
+                semplot(model, out_path)   # richiede binario 'dot'
+                st.image(out_path, caption="Schema SEM (Graphviz)", width="stretch")
+                tried_graphviz = True
             except Exception as e:
-                st.info(f"Impossibile generare il diagramma: {e}")
-        else:
-            st.info("Per il diagramma serve `semopy` con `semplot` e `graphviz`.")
+                st.info(f"Impossibile generare con Graphviz: {e}")
+
+        if (not _has_semplot) or (tried_graphviz is False):
+            fig = draw_sem_plotly(latents_config=used_latents, regressions=st.session_state.get(k("regs"), []))
+            if fig is not None:
+                st.plotly_chart(fig, width="stretch")
+                st.caption("Rendering alternativo senza Graphviz. Per lo schema classico installare il binario `graphviz` (dot).")
+            else:
+                st.info("Definire almeno un costrutto con indicatori per visualizzare il diagramma.")
 
 except Exception as e:
     st.error(f"Errore nella stima del modello: {e}")
