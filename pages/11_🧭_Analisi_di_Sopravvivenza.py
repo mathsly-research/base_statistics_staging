@@ -74,13 +74,12 @@ def k(name: str) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 def _km_curve_fallback(time: np.ndarray, event: np.ndarray):
     """Restituisce (t, S(t)) step-wise senza CI."""
-    # tempi evento unici >0
     df = pd.DataFrame({"t": time, "e": event}).sort_values("t")
     df = df[df["t"].notna()]
     t_unique = np.sort(df.loc[df["e"] == 1, "t"].unique())
     if t_unique.size == 0:
-        return np.array([0.0, float(df["t"].max() or 1.0)]), np.array([1.0, 1.0])
-    n = len(df)
+        tmax = float(df["t"].max() if df["t"].notna().any() else 1.0)
+        return np.array([0.0, tmax]), np.array([1.0, 1.0])
     s = 1.0
     t_list = [0.0]; S_list = [1.0]
     for t in t_unique:
@@ -89,7 +88,6 @@ def _km_curve_fallback(time: np.ndarray, event: np.ndarray):
         if at_risk > 0:
             s *= (1.0 - d / at_risk)
         t_list.append(float(t)); S_list.append(float(s))
-    # mantieni costoante fino al max tempo osservato
     t_list.append(float(df["t"].max()))
     S_list.append(float(S_list[-1]))
     return np.array(t_list, dtype=float), np.array(S_list, dtype=float)
@@ -104,7 +102,6 @@ def _median_survival_from_km(t: np.ndarray, S: np.ndarray) -> float | None:
 
 def _logrank_two_groups_fallback(t1, e1, t0, e0):
     """Log-rank per 2 gruppi (statistica ~ χ²(1))."""
-    # unisci tempi evento
     times = np.sort(np.unique(np.concatenate([t1[e1==1], t0[e0==1]])))
     Z = 0.0; V = 0.0
     for t in times:
@@ -117,12 +114,10 @@ def _logrank_two_groups_fallback(t1, e1, t0, e0):
             Z += (d1 - exp1)
             V += (n1 * n0 * d * (n - d)) / (n**2 * (n - 1)) if (n - 1) > 0 else 0.0
     chi2 = (Z**2) / V if V > 0 else np.nan
-    # p-value (approx) senza SciPy: usa funzione di ripiego
     try:
         from scipy.stats import chi2 as chi2dist
         p = float(chi2dist.sf(chi2, df=1))
     except Exception:
-        # approssimazione semplice per df=1 (SF ~ exp(-x/2) per code)
         p = math.exp(-chi2 / 2.0) if chi2 == chi2 else np.nan
     return float(chi2), float(p)
 
@@ -232,7 +227,6 @@ with left:
                                              fillcolor="rgba(127,127,127,0.15)",
                                              line=dict(width=0), showlegend=False, hoverinfo="skip", name=None))
                 if show_censors:
-                    # segni di censura sui tempi censurati
                     cens_t = gdf.loc[gdf["event"] == 0, "time"].values
                     fig.add_trace(go.Scatter(x=cens_t, y=km.predict(cens_t), mode="markers",
                                              marker=dict(symbol="line-ns", size=8, color=color),
@@ -299,7 +293,6 @@ with right:
         elif len(levels) > 2 and _has_lifelines:
             res = multivariate_logrank_test(work["time"], work["group"], work["event"])
             st.metric("Log-rank (k gruppi) — p-value", f"{res.p_value:.4f}")
-            # opzionale: pairwise
             with st.expander("Confronti **pairwise** (Holm-Bonferroni)", expanded=False):
                 pairs = list(itertools.combinations(levels, 2))
                 rows = []
@@ -308,30 +301,50 @@ with right:
                     p = logrank_test(A["time"], B["time"], A["event"], B["event"]).p_value
                     rows.append([a, b, p])
                 dfp = pd.DataFrame(rows, columns=["A", "B", "p"])
-                # Holm
                 dfp = dfp.sort_values("p").reset_index(drop=True)
                 m = len(dfp)
                 dfp["p_Holm"] = [min((m - i) * p, 1.0) for i, p in enumerate(dfp["p"])]
                 st.dataframe(dfp, use_container_width=True)
 
-# Numeri a rischio (tabella semplice)
+# Numeri a rischio (tabella) — versione robusta senza errori di default
 with st.expander("📊 Numeri a rischio (seleziona tempi)", expanded=False):
-    # punti default = quartili del tempo osservato
-    tmin, tmax = float(work["time"].min()), float(work["time"].max())
-    default_pts = [round(x, 2) for x in np.quantile(work["time"], [0, 0.25, 0.5, 0.75, 1.0])]
+    tmin = float(work["time"].min()); tmax = float(work["time"].max())
+    # Costruiamo un set di opzioni robusto (linspace + quantili), arrotondato a 2 decimali
+    def r2(x): return float(np.round(x, 2))
+    linpts = [r2(x) for x in np.linspace(tmin, tmax, 10)]
+    qpts   = [r2(x) for x in np.quantile(work["time"], [0, 0.25, 0.5, 0.75, 1.0])]
+    options = sorted(set(linpts + qpts))
+
+    # Default ancorato alle options per evitare StreamlitAPIException
+    def snap_to_options(vals: list[float], opts: list[float]) -> list[float]:
+        if not opts: return []
+        snapped = []
+        for v in vals:
+            if v in opts:
+                snapped.append(v)
+            else:
+                nearest = min(opts, key=lambda o: abs(o - v))
+                if nearest not in snapped:
+                    snapped.append(nearest)
+        return snapped or [opts[0]]
+
+    default_opts = snap_to_options(qpts, options)
+
     cutpoints = st.multiselect("Tempi in cui mostrare N a rischio",
-                               options=[round(x, 2) for x in np.linspace(tmin, tmax, 10)],
-                               default=default_pts, key=k("risk_pts"))
+                               options=options,
+                               default=default_opts, key=k("risk_pts"))
     if cutpoints:
         risk = _numbers_at_risk(work, "time", "event", group_col, cutpoints)
         st.dataframe(risk.astype(int), use_container_width=True)
+        st.caption("Valori mostrati: **numero di soggetti ancora a rischio** a ciascun tempo selezionato (censurati ed eventi pregressi esclusi).")
 
-with st.expander("ℹ️ Come leggere KM e log-rank", expanded=False):
+with st.expander("ℹ️ Come leggere KM, log-rank e N a rischio", expanded=False):
     st.markdown(
-        "- **S(t)** è la probabilità di **non** aver avuto l’evento entro il tempo t (linea a gradini).  \n"
-        "- **Mediana di sopravvivenza**: il tempo in cui S(t)=0.5. Se non raggiunta (curva >0.5), la mediana è **non stimabile**.  \n"
-        "- **Tick di censura**: osservazioni interrotte; non sono eventi ma contribuiscono al denominatore finché osservate.  \n"
-        "- **Log-rank**: confronta globalmente le curve tra gruppi; p-value piccolo ⇒ differenza significativa dei rischi nel tempo (assume **hazard proporzionali**)."
+        "- **S(t)**: probabilità di **non** aver avuto l’evento entro t (linea a gradini). Intervalli di confidenza (se mostrati) quantificano l’incertezza.  \n"
+        "- **Mediana di sopravvivenza**: tempo per cui S(t)=0.5; se la curva resta >0.5 non è stimabile.  \n"
+        "- **Tick di censura**: istanti di uscita dall’osservazione; non rappresentano eventi.  \n"
+        "- **Log-rank**: p-value piccolo ⇒ differenza globale tra le curve (assume **hazard proporzionali**); con più gruppi usare anche confronti **pairwise** con correzione.  \n"
+        "- **Numeri a rischio**: aiutano a valutare l’**affidabilità** della coda delle curve; valori molto bassi implicano stime **instabili**."
     )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -341,7 +354,6 @@ st.markdown("### 3) Modello di Cox (hazard proporzionali)")
 if not _has_lifelines:
     st.info("Il modello di Cox richiede **lifelines**. Installare `lifelines` per abilitare la sezione seguente.")
 else:
-    # Scelte variabili
     covar_opts = [c for c in df.columns if c not in {time_col, event_col}]
     colA, colB, colC = st.columns([1.6, 1.0, 1.0])
     with colA:
@@ -352,11 +364,8 @@ else:
         ties = st.selectbox("Gestione dei tie", options=["efron", "breslow", "exact"], index=0, key=k("ties"))
 
     if covars:
-        # Costruzione dataframe per Cox (trasformazione categoriche in dummies)
         X = df[[time_col, event_col] + covars].copy()
-        # evento binario 0/1 (già costruito prima)
         X[event_col] = event
-        # numeriche → z-score
         if zscore:
             for c in covars:
                 if pd.api.types.is_numeric_dtype(X[c]):
@@ -364,7 +373,6 @@ else:
                     mu, sd = float(s.mean()), float(s.std(ddof=1))
                     if sd and sd > 0:
                         X.loc[:, c] = (s - mu) / sd
-        # categoriche → dummies (drop_first)
         X = pd.get_dummies(X, columns=[c for c in covars if not pd.api.types.is_numeric_dtype(df[c])],
                            drop_first=True)
         X = X.dropna(subset=[time_col, event_col])
@@ -378,7 +386,6 @@ else:
                 cph.fit(X, duration_col=time_col, event_col=event_col, show_progress=False, ties=ties)
                 st.markdown("**Tabella dei coefficienti (scala HR)**")
                 summ = cph.summary.copy()
-                # Rinomina e seleziona colonne
                 cols = {
                     "exp(coef)": "HR",
                     "exp(coef) lower 95%": "HR CI 2.5%",
@@ -405,8 +412,9 @@ else:
                 with st.expander("ℹ️ Come interpretare il **modello di Cox**", expanded=False):
                     st.markdown(
                         "- **HR (Hazard Ratio)**: fattore moltiplicativo sul **rischio istantaneo**. HR>1 aumenta il rischio, HR<1 lo riduce.  \n"
-                        "- **Intervallo di confidenza**: se il CI di HR **non** include 1, l’effetto è statisticamente significativo (al livello α prescelto).  \n"
-                        "- **Concordance index**: probabilità che, per una coppia, il soggetto con rischio stimato maggiore fallisca prima (≈ potere discriminante)."
+                        "- **Intervallo di confidenza**: se il CI di HR **non** include 1, l’effetto è statisticamente significativo.  \n"
+                        "- **Concordance index**: probabilità che l’ordine dei tempi osservati sia coerente con l’ordine dei rischi stimati (discriminazione).  \n"
+                        "- **Ties**: *efron* consigliato in generale; *breslow* è più veloce; *exact* per molti legami (ma costoso)."
                     )
 
                 # Diagnostica PH (Schoenfeld)
@@ -421,12 +429,10 @@ else:
                 except Exception as e:
                     st.caption(f"Test di PH non disponibile: {e}")
 
-                # Grafici di sopravvivenza predetta (due profili semplici)
+                # Sopravvivenza predetta (due profili)
                 with st.expander("📈 Sopravvivenza predetta per profili di covariate (facoltativo)"):
-                    # Costruiamo due profili: media e media+1sd (per numeriche). Per dummies: 0/1
                     base = X.drop(columns=[time_col, event_col]).median(numeric_only=True)
-                    prof1 = base.copy()
-                    prof2 = base.copy()
+                    prof1 = base.copy(); prof2 = base.copy()
                     for c in base.index:
                         if c in X.columns and pd.api.types.is_numeric_dtype(X[c]):
                             prof2[c] = base[c] + X[c].std(ddof=1)
@@ -444,6 +450,7 @@ else:
                                            title="Sopravvivenza predetta (Cox)",
                                            xaxis_title=f"Tempo ({time_col})", yaxis_title="S(t)")
                         st.plotly_chart(figp, use_container_width=True)
+                        st.caption("Confrontare i profili per quantificare l’effetto combinato delle covariate sulla sopravvivenza prevista.")
                     except Exception:
                         st.info("Impossibile calcolare le curve predette con il profilo scelto.")
 
