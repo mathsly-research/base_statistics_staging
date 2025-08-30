@@ -73,7 +73,7 @@ except Exception:
 # ──────────────────────────────────────────────────────────────────────────────
 # Config & NAV
 # ──────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="⏱️ Analisi Serie Temporali", layout="wide")
+st.set_page_config(page_title="Analisi Serie Temporali", layout="wide")
 try:
     from nav import sidebar
     sidebar()
