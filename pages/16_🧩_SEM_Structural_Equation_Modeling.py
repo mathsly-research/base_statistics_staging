@@ -339,7 +339,7 @@ def _extract_fit_table(stats_obj) -> pd.DataFrame:
 # Header
 # ──────────────────────────────────────────────────────────────────────────────
 st.title("🧩 Structural Equation Modeling (SEM)")
-st.caption("CFA/SEM con validazioni robuste all’inserimento dei costrutti, indici di fit resilienti e diagramma con fallback.")
+st.caption("CFA/SEM con validazioni robuste, indici di fit resilienti e diagramma con fallback.")
 
 with st.expander("Stato dati", expanded=False):
     stamp_meta()
@@ -733,6 +733,71 @@ try:
         st.metric("BIC",  f"{bic:.2f}" if pd.notna(bic) else "—",
                   help="Bayesian Information Criterion (più basso è, meglio è).")
 
+    # ── Interpretazione automatica sotto gli indici di bontà
+    st.markdown("#### Interpretazione degli indici (per questo modello)")
+    def _grade(val, good, ok, reverse=False):
+        """
+        Classifica su 3 livelli:
+          - Ottimo: se (val >= good) per indici 'alti=meglio' oppure (val <= good) per 'bassi=meglio'
+          - Accettabile: se tra good e ok
+          - Debole: altrimenti
+        Se val è NaN → 'Non disponibile'
+        """
+        import math
+        if val is None or (isinstance(val, float) and math.isnan(val)):
+            return "Non disponibile"
+        if not reverse:  # alto = meglio
+            if val >= good: return "Ottimo"
+            if val >= ok:   return "Accettabile"
+            return "Debole"
+        else:             # basso = meglio
+            if val <= good: return "Ottimo"
+            if val <= ok:   return "Accettabile"
+            return "Debole"
+
+    lines = []
+
+    # χ²/df (basso è meglio): soglie tipiche 2 (ottimo), 3 (accettabile)
+    chi_over_df = (chi2/dfv) if (pd.notna(chi2) and pd.notna(dfv) and dfv>0) else np.nan
+    g = _grade(chi_over_df, good=2.0, ok=3.0, reverse=True)
+    lines.append(f"- **χ²/df** = {('%.2f' % chi_over_df) if pd.notna(chi_over_df) else '—'} → **{g}**. "
+                 "Valori più bassi indicano migliore parsimonia; attenzione: il test χ² è sensibile alla numerosità campionaria.")
+
+    # CFI (alto=meglio): 0.95 ottimo, 0.90 accettabile
+    g = _grade(cfi, good=0.95, ok=0.90, reverse=False)
+    lines.append(f"- **CFI** = {('%.3f' % cfi) if pd.notna(cfi) else '—'} → **{g}**. "
+                 "≥0.95 ottimo, ≥0.90 accettabile; confronta il modello con uno nullo.")
+
+    # TLI (alto=meglio): 0.95 ottimo, 0.90 accettabile
+    g = _grade(tli, good=0.95, ok=0.90, reverse=False)
+    lines.append(f"- **TLI/NNFI** = {('%.3f' % tli) if pd.notna(tli) else '—'} → **{g}**. "
+                 "Corregge per la complessità: penalizza modelli troppo complicati.")
+
+    # RMSEA (basso=meglio): ≤0.05 ottimo, ≤0.08 accettabile, >0.10 debole
+    # Lo mappiamo su soglie (good=0.05, ok=0.08)
+    g = _grade(rmsea, good=0.05, ok=0.08, reverse=True)
+    lines.append(f"- **RMSEA** = {('%.3f' % rmsea) if pd.notna(rmsea) else '—'} → **{g}**. "
+                 "≤0.05 ottimo, 0.05–0.08 accettabile, 0.08–0.10 mediocre, >0.10 scarso.")
+
+    # SRMR (basso=meglio): ≤0.05 ottimo, ≤0.08 accettabile
+    g = _grade(srmr, good=0.05, ok=0.08, reverse=True)
+    lines.append(f"- **SRMR** = {('%.3f' % srmr) if pd.notna(srmr) else '—'} → **{g}**. "
+                 "Residuo medio standardizzato: ≤0.08 in genere accettabile.")
+
+    # AIC/BIC (basso=meglio) — confronto tra modelli annidati/non annidati
+    if pd.notna(aic):
+        lines.append(f"- **AIC** = {('%.2f' % aic)} → più **basso** è, meglio è (confronto tra modelli sulla **stessa** base dati).")
+    else:
+        lines.append("- **AIC** = —")
+    if pd.notna(bic):
+        lines.append(f"- **BIC** = {('%.2f' % bic)} → più **basso** è, meglio è; penalizza di più la complessità rispetto all’AIC.")
+    else:
+        lines.append("- **BIC** = —")
+
+    st.markdown("\n".join(lines))
+    st.caption("Gli **cutoff** sono linee guida, non regole rigide: interpretare sempre nel contesto teorico, "
+               "qualità dei dati, numerosità campionaria e scopi dell’analisi.")
+
     # ── Diagramma del modello: Graphviz se disponibile, altrimenti fallback Plotly
     with st.expander("Diagramma del modello"):
         used_latents = st.session_state.get(k("latents"), [])
@@ -759,9 +824,9 @@ except Exception as e:
     st.stop()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Interpretazione (promemoria)
+# Interpretazione (promemoria generale)
 # ──────────────────────────────────────────────────────────────────────────────
-with st.expander("📝 Come leggere i risultati", expanded=True):
+with st.expander("📝 Promemoria di lettura generale", expanded=False):
     st.markdown(
         "- **Loadings (λ)**: ≥0.5–0.7 indicano indicatori forti; p piccoli ⇒ loading ≠ 0.  \n"
         "- **Affidabilità**: **α ≥ 0.70**; con soluzione standardizzata si possono calcolare **CR** e **AVE**.  \n"
