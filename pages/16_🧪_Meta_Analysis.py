@@ -304,29 +304,28 @@ with st.expander("📝 Come leggere questi numeri", expanded=True):
     )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# FOREST PLOT (stile “tabella + quadrati + diamante verde”)
+# 5) Forest plot (compatibile Plotly: niente add_vline, uso add_shape con xref/yref)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("### 5) Forest plot")
 
-# Ordino per precisione (peso) e preparo colonne tabella
 tau2_use = res["tau2"] if model_type.startswith("Random") else 0.0
 ES_plot = ES.copy()
 ES_plot["weight"] = 1/(ES_plot["vi"] + tau2_use)
 ES_plot["w_pct"] = 100*ES_plot["weight"]/ES_plot["weight"].sum()
 ES_plot = ES_plot.sort_values("weight", ascending=False).reset_index(drop=True)
+
 z = z_for(conf)
 ES_plot["lo"] = ES_plot["yi"] - z*ES_plot["se"]
 ES_plot["hi"] = ES_plot["yi"] + z*ES_plot["se"]
 ES_plot["ypos"] = np.arange(len(ES_plot))[::-1]  # dall’alto verso il basso
 
-# Colonne descrittive a sinistra (tabella)
-def _fmt(v, d=2): 
+def _fmt(v, d=2):
     return "—" if (v is None or (isinstance(v, float) and not np.isfinite(v))) else f"{v:.{d}f}"
 def _as_str_cont(r):
-    if r["type"]!="continuous": return "—", "—", "—", "—", "—", "—"
+    if r["type"]!="continuous": return "—","—","—","—","—","—"
     return int(r["n1"]), _fmt(r["m1"]), _fmt(r["sd1"]), int(r["n0"]), _fmt(r["m0"]), _fmt(r["sd0"])
 def _as_str_bin(r):
-    if r["type"]!="binary": return "—", "—", "—", "—"
+    if r["type"]!="binary": return "—","—","—","—"
     return int(r["e1"]), int(r["ne1"]), int(r["e0"]), int(r["ne0"])
 
 tab_rows = []
@@ -335,11 +334,11 @@ for _, r in ES_plot.iterrows():
     e1v, ne1v, e0v, ne0v = _as_str_bin(r)
     ci_txt = f"{_fmt(r['yi'],3)} [{_fmt(r['lo'],3)}, {_fmt(r['hi'],3)}]"
     tab_rows.append([
-        str(r["study"]),            # Studio
-        n1, m1v, sd1v,              # Tratt
-        n0, m0v, sd0v,              # Controllo
-        e1v, ne1v, e0v, ne0v,       # Binario
-        ci_txt, f"{r['w_pct']:.2f}%" # Effetto (testo), Peso
+        str(r["study"]),
+        n1, m1v, sd1v,
+        n0, m0v, sd0v,
+        e1v, ne1v, e0v, ne0v,
+        ci_txt, f"{r['w_pct']:.2f}%"
     ])
 
 table_header = [
@@ -348,7 +347,9 @@ table_header = [
     "Effect (95% CI)","Weight (%)"
 ]
 
-# Subplot: col1 Table, col2 Scatter
+from plotly.subplots import make_subplots
+import plotly.graph_objects as go
+
 fig = make_subplots(
     rows=1, cols=2,
     column_widths=[0.58, 0.42],
@@ -356,15 +357,14 @@ fig = make_subplots(
     horizontal_spacing=0.02
 )
 
-# Tabella a sinistra
+# Tabella sinistra
 fig.add_trace(go.Table(
     header=dict(values=table_header, align="left"),
     cells=dict(values=list(map(list, zip(*tab_rows))), align="left"),
 ), row=1, col=1)
 
-# Forest a destra
-# Marker come QUADRATI, grandezza proporzionale al peso
-sizes = 6 + 24*(ES_plot["w_pct"]/ES_plot["w_pct"].max())  # 6..30
+# Pannello forest (asse x2/y2)
+sizes = 6 + 24*(ES_plot["w_pct"]/ES_plot["w_pct"].max())
 fig.add_trace(go.Scatter(
     x=ES_plot["yi"], y=ES_plot["ypos"],
     mode="markers",
@@ -374,25 +374,33 @@ fig.add_trace(go.Scatter(
     showlegend=False
 ), row=1, col=2)
 
-# Barre di confidenza (segmenti)
+# Barre CI
 for _, r in ES_plot.iterrows():
-    fig.add_shape(type="line",
-                  x0=r["lo"], x1=r["hi"], y0=r["ypos"], y1=r["ypos"],
-                  line=dict(width=2),
-                  row=1, col=2)
+    fig.add_shape(
+        type="line",
+        x0=r["lo"], x1=r["hi"], y0=r["ypos"], y1=r["ypos"],
+        line=dict(width=2),
+        xref="x2", yref="y2"
+    )
 
-# Linea verticale dell'effetto complessivo
-fig.add_vline(x=mu_hat, line=dict(color="black", width=1.5), row=1, col=2)
+# Linea verticale dell'effetto complessivo (usa shape con xref/yref)
+y_min = float(min(ES_plot["ypos"].min()-2.0, -2.5))
+y_max = float(ES_plot["ypos"].max()+1.0)
+fig.add_shape(
+    type="line",
+    x0=mu_hat, x1=mu_hat, y0=y_min, y1=y_max,
+    line=dict(color="black", width=1.5),
+    xref="x2", yref="y2"
+)
 
-# Diamante verde in basso
+# Diamante verde
 y_d = -1.5
 diamond_x = [lo, mu_hat, hi, mu_hat, lo]
 diamond_y = [y_d, y_d-0.6, y_d, y_d+0.6, y_d]
 fig.add_trace(go.Scatter(
-    x=diamond_x, y=diamond_y,
-    mode="lines", fill="toself",
-    line=dict(color="green"), fillcolor="rgba(0,128,0,0.25)",
-    showlegend=False
+    x=diamond_x, y=diamond_y, mode="lines",
+    fill="toself", line=dict(color="green"),
+    fillcolor="rgba(0,128,0,0.25)", showlegend=False
 ), row=1, col=2)
 fig.add_annotation(x=mu_hat, y=y_d-0.9, text="Overall", showarrow=False, row=1, col=2)
 
@@ -400,20 +408,14 @@ fig.add_annotation(x=mu_hat, y=y_d-0.9, text="Overall", showarrow=False, row=1, 
 pad = max( (ES_plot["hi"].max()-ES_plot["lo"].min())*0.05, 0.1 )
 x_min = float(ES_plot["lo"].min()-pad); x_max = float(ES_plot["hi"].max()+pad)
 fig.update_xaxes(title_text="Effect size (yi)", range=[x_min, x_max], row=1, col=2)
-fig.update_yaxes(visible=False, row=1, col=2)
+fig.update_yaxes(visible=False, range=[y_min, y_max], row=1, col=2)
 
 fig.update_layout(
     title=f"Forest plot — {res['model']}  •  μ̂={mu_hat:.3f}  [{lo:.3f}, {hi:.3f}]",
     margin=dict(l=10, r=10, t=60, b=10),
     height=420 + 22*len(ES_plot)
 )
-
 st.plotly_chart(fig, width="stretch")
-with st.expander("📝 Come leggere il forest plot", expanded=False):
-    st.markdown(
-        "A sinistra la **tabella per studio**; a destra: **quadrati** proporzionali al **peso** e **segmenti** per gli **IC**.  "
-        "Il **diamante verde** in basso rappresenta la **stima combinata** e il suo IC; la **linea verticale** è μ̂."
-    )
 
 # ──────────────────────────────────────────────────────────────────────────────
 # FUNNEL PLOT (stile con triangolo tratteggiato e linea μ̂)
