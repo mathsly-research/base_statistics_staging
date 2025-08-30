@@ -41,7 +41,7 @@ except Exception:
         with c3: st.metric("Ultimo aggiornamento", when)
 
 # ──────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="🧹 Pulizia Dati", layout="wide")
+st.set_page_config(page_title="Pulizia Dati", layout="wide")
 try:
     from nav import sidebar; sidebar()
 except Exception:
