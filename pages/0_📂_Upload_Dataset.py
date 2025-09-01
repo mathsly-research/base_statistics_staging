@@ -66,6 +66,8 @@ st.markdown("""
   --shadow:0 8px 22px rgba(0,0,0,.06);
   --radius:18px;
 }
+
+/* Box domanda */
 .calc-wrap{
   padding:22px 22px 18px; background: var(--bg-grad);
   border-radius: var(--radius); border:1px solid rgba(15,23,42,.08); box-shadow: var(--shadow);
@@ -79,36 +81,63 @@ st.markdown("""
 }
 .calc-go .stButton>button:hover{ filter:brightness(1.05); transform:translateY(-1px); }
 
-/* Contenitore consigliati (nuovo sfondo) */
+/* Contenitore consigliati (sfondo dedicato) */
 .rec-wrap{
   padding:18px 18px 12px;
   background: var(--rec-bg);
   border:1px solid rgba(15,23,42,.08);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  margin-top: .5rem;
+  margin-top:.5rem;
 }
 
+/* Card consigliata con CTA interno */
 .rec-card{
-  padding:14px 16px; background:#fff; border-radius:14px;
-  border:1px solid rgba(2,6,23,.06); box-shadow:var(--shadow); margin-bottom:.75rem;
+  position:relative;
+  padding:16px 16px 58px;   /* spazio per CTA in basso */
+  background:#fff;
+  border-radius:14px;
+  border:1px solid rgba(2,6,23,.06);
+  box-shadow:var(--shadow);
+  margin-bottom:.9rem;
+  transition: box-shadow .15s ease, transform .05s ease;
 }
-.rec-card:hover{ box-shadow:0 14px 28px rgba(0,0,0,.08); }
-.rec-card .title{ font-weight:700; margin-bottom:4px; }
-.rec-card .desc{ color:#475569; font-size:.92rem; margin-bottom:.6rem; }
+.rec-card:hover{ box-shadow:0 14px 28px rgba(0,0,0,.09); transform: translateY(-1px); }
+.rec-card .title{ font-weight:700; margin-bottom:6px; font-size:1.02rem; }
+.rec-card .desc{ color:#475569; font-size:.92rem; line-height:1.35; }
+
+/* Bordini sinistri colorati */
 .rec-blue{ border-left:6px solid var(--brand1); }
 .rec-green{ border-left:6px solid var(--brand2); }
 .rec-violet{ border-left:6px solid var(--brand3); }
 .rec-amber{ border-left:6px solid var(--brand4); }
-.rec-card .stButton>button{
-  width:100%; border:none; border-radius:10px; padding:.5rem .75rem; color:#0f172a;
+
+/* CTA interno alla card */
+.card-cta{ position:absolute; left:16px; right:16px; bottom:12px; }
+.card-cta .stButton>button{
+  width:100%;
+  border:none;
+  border-radius:10px;
+  padding:.55rem .8rem;
+  color:#0f172a;
   background: rgba(14,165,233,.12);
 }
-.rec-green .stButton>button{ background: rgba(34,197,94,.12); }
-.rec-violet .stButton>button{ background: rgba(168,85,247,.12); }
-.rec-amber .stButton>button{ background: rgba(245,158,11,.12); }
-.rec-card .stButton>button:hover{ filter:brightness(1.02); }
+.rec-green .card-cta .stButton>button{ background: rgba(34,197,94,.12); }
+.rec-violet .card-cta .stButton>button{ background: rgba(168,85,247,.12); }
+.rec-amber .card-cta .stButton>button{ background: rgba(245,158,11,.12); }
+.card-cta .stButton>button:hover{ filter:brightness(1.03); }
 
+/* CTA bloccato */
+.card-cta.locked .stButton>button{
+  background: #f1f5f9; color:#94a3b8; border:1px dashed #cbd5e1;
+}
+
+/* Griglia responsiva: 3→2→1 colonne */
+.rec-grid{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px; }
+@media (max-width: 1200px){ .rec-grid{ grid-template-columns:1fr 1fr; } }
+@media (max-width: 780px) { .rec-grid{ grid-template-columns:1fr; } }
+
+/* Menù rapido */
 .quick-menu{ padding:14px; background:#fff; border:1px dashed rgba(15,23,42,.15); border-radius:14px; }
 [data-testid="stMetricValue"]{ color:#0f172a; }
 </style>
@@ -310,7 +339,7 @@ with right:
             st.caption("L’esempio *Studio primario* consente di provare: descrittive, test, regressioni, ROC/PR, agreement, sopravvivenza.")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Passo 2 · Opzioni lettura
+# Passo 2 · Opzioni lettura (CSV)
 # ──────────────────────────────────────────────────────────────────────────────
 st.subheader("Passo 2 · Conferma dati (opzioni di lettura CSV)")
 c1, c2, c3, c4 = st.columns(4)
@@ -384,88 +413,93 @@ with st.expander("Stato dati", expanded=False):
 saved_ok = bool(ss_get(k("saved"), False))
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Divisore netto tra salvataggio e suggerimenti (richiesta)
+# Divisore netto tra salvataggio e suggerimenti
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Consigliati per i tuoi dati (in riquadro con sfondo dedicato)
+# Consigliati per i tuoi dati (riquadro con sfondo dedicato)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("#### ✅ Consigliati per i tuoi dati")
 st.markdown("<div class='rec-wrap'>", unsafe_allow_html=True)
 
-rec_cards = []
+rec_cards: list[tuple[str,str,str,list[str],list[str]]] = []
+
 def add_card(label: str, desc: str, color: str, primary: list[str], tokens: list[str]):
     rec_cards.append((label, desc, color, primary, tokens))
 
 # Base
-add_card("📈 Statistiche descrittive", "Tabelle e grafici di base (continue e categoriche).", "rec-blue",
-         ["2_📈_Descriptive_Statistics.py"], ["descriptive","statistiche"])
-add_card("🧪 Test statistici", "t-test, ANOVA, χ² e non parametrici.", "rec-amber",
-         ["5_🧪_Statistical_Tests.py"], ["test","statistici"])
-add_card("🔗 Correlazioni", "Matrice di correlazione, heatmap e p-value.", "rec-violet",
-         ["6_🔗_Correlation_Analysis.py"], ["correlation","correlazioni"])
+add_card("📈 Statistiche descrittive", "Tabelle e grafici di base (continue e categoriche).",
+         "rec-blue", ["2_📈_Descriptive_Statistics.py"], ["descriptive","statistiche"])
+add_card("🧪 Test statistici", "t-test, ANOVA, χ² e non parametrici.",
+         "rec-amber", ["5_🧪_Statistical_Tests.py"], ["test","statistici"])
+add_card("🔗 Correlazioni", "Matrice di correlazione, heatmap e p-value.",
+         "rec-violet", ["6_🔗_Correlation_Analysis.py"], ["correlation","correlazioni"])
 
 # Regressioni
 if "regression" in topics:
-    add_card("📉 Regressione lineare", "Modello lineare per outcome continuo.", "rec-green",
-             ["8_🧮_Regression.py"], ["regression","lineare"])
+    add_card("📉 Regressione lineare", "Modello lineare per outcome continuo.",
+             "rec-green", ["8_🧮_Regression.py"], ["regression","lineare"])
 if "logistic" in topics:
-    add_card("📈 Regressione logistica", "Modello logit per outcome binario.", "rec-blue",
-             ["8_🧮_Regression.py"], ["regression","logistica"])
+    add_card("📈 Regressione logistica", "Modello logit per outcome binario.",
+             "rec-blue", ["8_🧮_Regression.py"], ["regression","logistica"])
 
 # Diagnostici
 if "diagnostics" in topics:
-    add_card("🔬 Test diagnostici (ROC/PR)", "Curve ROC/PR, sensibilità/specificità, soglia ottimale.", "rec-amber",
-             ["9_🔬_Analisi_Test_Diagnostici.py"], ["diagnostici","roc"])
+    add_card("🔬 Test diagnostici (ROC/PR)", "Curve ROC/PR, sensibilità/specificità, soglia ottimale.",
+             "rec-amber", ["9_🔬_Analisi_Test_Diagnostici.py"], ["diagnostici","roc"])
 
 # Agreement
 if "agreement" in topics:
-    add_card("📏 Agreement (Bland–Altman)", "Bias, LoA e grafici per due metodi.", "rec-violet",
-             ["10_📏_Agreement.py"], ["agreement","bland"])
+    add_card("📏 Agreement (Bland–Altman)", "Bias, LoA e grafici per due metodi.",
+             "rec-violet", ["10_📏_Agreement.py"], ["agreement","bland"])
 
 # Sopravvivenza
 if "survival" in topics:
-    add_card("🧭 Sopravvivenza", "Kaplan–Meier, Cox, numeri a rischio.", "rec-green",
-             ["11_🧭_Analisi_di_Sopravvivenza.py"], ["sopravvivenza","survival"])
+    add_card("🧭 Sopravvivenza", "Kaplan–Meier, Cox, numeri a rischio.",
+             "rec-green", ["11_🧭_Analisi_di_Sopravvivenza.py"], ["sopravvivenza","survival"])
 
 # Longitudinale / Panel
 if "longitudinal" in topics:
-    add_card("📈 Longitudinale (misure ripetute)", "Traiettorie e modelli ad effetti misti.", "rec-blue",
-             ["12_📈_Longitudinale_Misure_Ripetute.py"], ["longitudinale"])
+    add_card("📈 Longitudinale (misure ripetute)", "Traiettorie e modelli ad effetti misti.",
+             "rec-blue", ["12_📈_Longitudinale_Misure_Ripetute.py"], ["longitudinale"])
 if "panel" in topics:
-    add_card("🏷️ Panel (econometria)", "Pooled/FE/RE, Hausman, robuste/clustered SE.", "rec-amber",
-             ["13_📊_Panel_Analysis.py","13_📊_Panel.py"], ["panel"])
+    add_card("🏷️ Panel (econometria)", "Pooled/FE/RE, Hausman, robuste/clustered SE.",
+             "rec-amber", ["13_📊_Panel_Analysis.py","13_📊_Panel.py"], ["panel"])
 
 # Serie temporali
 if "timeseries" in topics:
-    add_card("⏱️ Serie temporali", "ARIMA/ETS, decomposizione, previsione.", "rec-violet",
-             ["14_⏱️_Analisi_Serie_Temporali.py"], ["serie","temporali"])
+    add_card("⏱️ Serie temporali", "ARIMA/ETS, decomposizione, previsione.",
+             "rec-violet", ["14_⏱️_Analisi_Serie_Temporali.py"], ["serie","temporali"])
 
-# Griglia cards consigliate (DISABILITATE se non salvato)
-if rec_cards:
-    rows = (len(rec_cards)+2)//3
-    idx = 0
-    for _ in range(rows):
-        c1, c2, c3 = st.columns(3)
-        for col in (c1, c2, c3):
-            if idx >= len(rec_cards): continue
-            label, desc, color, prim, toks = rec_cards[idx]
-            with col:
-                st.markdown(f"<div class='rec-card {color}'>"
-                            f"<div class='title'>{label}</div>"
-                            f"<div class='desc'>{desc}</div>"
-                            f"</div>", unsafe_allow_html=True)
-                st.button(label, use_container_width=True, key=k(f"rec_{idx}"),
-                          disabled=not saved_ok,
-                          on_click=(lambda p=prim, t=toks: (set_uploaded(df, "from upload page"),
-                                                            safe_switch_by_tokens(p, t))) if saved_ok else None)
-            idx += 1
+# Funzione di rendering card con CTA interno
+def render_card(label: str, desc: str, color: str,
+                primary: list[str], tokens: list[str],
+                saved_ok: bool, key: str, df: pd.DataFrame):
+    st.markdown(f"<div class='rec-card {color}'>"
+                f"<div class='title'>{label}</div>"
+                f"<div class='desc'>{desc}</div>"
+                f"</div>", unsafe_allow_html=True)
+    # CTA
+    st.markdown(f"<div class='card-cta{' locked' if not saved_ok else ''}'>", unsafe_allow_html=True)
+    if saved_ok:
+        if st.button(label, key=key, use_container_width=True):
+            set_uploaded(df, "from upload page")
+            safe_switch_by_tokens(primary, tokens)
+    else:
+        st.button("🔒 Salva per abilitare", key=key+"_lock", use_container_width=True, disabled=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-st.markdown("</div>", unsafe_allow_html=True)  # chiusura rec-wrap
+# Griglia responsiva delle card
+st.markdown("<div class='rec-grid'>", unsafe_allow_html=True)
+for idx, (label, desc, color, prim, toks) in enumerate(rec_cards):
+    with st.container():
+        render_card(label, desc, color, prim, toks, saved_ok, key=k(f"rec_{idx}"), df=df)
+st.markdown("</div>", unsafe_allow_html=True)   # chiusura rec-grid
+st.markdown("</div>", unsafe_allow_html=True)   # chiusura rec-wrap
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Opzioni avanzate — spostate sotto le statistiche consigliate (richiesta)
+# Opzioni avanzate — sotto i consigliati
 # ──────────────────────────────────────────────────────────────────────────────
 with st.expander("Opzioni avanzate (SEM, Meta-analisi)"):
     adv1, adv2 = st.columns(2)
@@ -485,7 +519,7 @@ with st.expander("Opzioni avanzate (SEM, Meta-analisi)"):
                   ))) if saved_ok else None)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Menù accattivante: “Cosa vuoi calcolare?” (DISABILITATO finché non salvato)
+# Menù “Cosa vuoi calcolare?” (bloccato finché non salvato)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.markdown("<div class='calc-wrap'>"
