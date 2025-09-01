@@ -4,6 +4,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import unicodedata
+import os, time
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Data Store (preferito) + fallback
@@ -11,7 +12,6 @@ import unicodedata
 try:
     from data_store import ensure_initialized, get_uploaded, get_active, set_active, stamp_meta
 except Exception:
-    import time
     def ensure_initialized():
         st.session_state.setdefault("ds_active_df", None)
         st.session_state.setdefault("ds_uploaded_df", None)
@@ -50,7 +50,6 @@ except Exception:
 # Utility locali
 KEY = "dc"
 def k(name: str) -> str: return f"{KEY}_{name}"
-def ss_get(name: str, default=None): return st.session_state.get(name, default)
 def ss_set_default(name: str, value):
     if name not in st.session_state: st.session_state[name] = value
 
@@ -250,6 +249,68 @@ if st.button("Applica normalizzazione testo", use_container_width=True, key=k("a
         st.success("Normalizzazione testo applicata.")
     except Exception as e:
         st.error(f"Errore: {e}")
+
+# ============ NUOVA SEZIONE: SALVA / ESPORTA ============
+st.markdown("---")
+st.subheader("💾 Salva / Esporta dati puliti")
+
+c1, c2, c3 = st.columns(3)
+
+with c1:
+    if st.button("💾 Salva versione (in /mnt/data)", use_container_width=True, key=k("save_ver")):
+        try:
+            ensure_initialized()
+            df_current = get_active(required=True)
+            meta = st.session_state["ds_meta"]
+            ver = int(meta.get("version", 0))
+            ts = int(time.time())
+            fname = f"cleaned_v{ver}_{ts}.csv"
+            path = os.path.join("/mnt/data", fname)
+            df_current.to_csv(path, index=False)
+            st.session_state.setdefault("ds_saved_versions", [])
+            st.session_state["ds_saved_versions"].append(
+                {"version": ver, "path": path, "ts": ts, "rows": int(len(df_current))}
+            )
+            st.session_state[k("last_saved_path")] = path
+            st.success(f"Versione salvata: {path}")
+        except Exception as e:
+            st.error(f"Errore salvataggio: {e}")
+
+with c2:
+    try:
+        csv_bytes = get_active(required=True).to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇️ Scarica CSV",
+            data=csv_bytes,
+            file_name="dati_puliti.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key=k("dl_csv")
+        )
+    except Exception as e:
+        st.info("Nessun dataset attivo da scaricare.")
+
+with c3:
+    if st.button("📌 Conferma come versione attiva", use_container_width=True, key=k("confirm_active")):
+        try:
+            # Non modifica i dati, ma aggiorna meta/versione per "blocco" esplicito
+            set_active(get_active(required=True), source="cleaning", note="manual confirm")
+            st.success("Versione corrente confermata come attiva.")
+        except Exception as e:
+            st.error(f"Errore: {e}")
+
+# Storico versioni salvate
+saved = st.session_state.get("ds_saved_versions", [])
+if saved:
+    with st.expander("Versioni salvate (storico)", expanded=False):
+        hist = pd.DataFrame(saved)
+        if not hist.empty:
+            # Formattazioni minime
+            hist = hist.sort_values("ts", ascending=False)
+            pretty = hist.assign(
+                when=hist["ts"].apply(lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)))
+            )[["version", "rows", "when", "path"]]
+            st.dataframe(pretty, use_container_width=True)
 
 # Navigazione
 st.markdown("---")
