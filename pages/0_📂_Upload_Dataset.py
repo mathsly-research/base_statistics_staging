@@ -51,7 +51,7 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# STILE: palette e componenti (colorato + coerente)
+# STILE (colori e componenti)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -65,49 +65,29 @@ st.markdown("""
   --shadow:0 8px 22px rgba(0,0,0,.06);
   --radius:18px;
 }
-
-/* Contenitore domanda "Cosa vuoi calcolare" */
 .calc-wrap{
-  padding:22px 22px 18px;
-  background: var(--bg-grad);
-  border-radius: var(--radius);
-  border:1px solid rgba(15,23,42,.08);
-  box-shadow: var(--shadow);
+  padding:22px 22px 18px; background: var(--bg-grad);
+  border-radius: var(--radius); border:1px solid rgba(15,23,42,.08); box-shadow: var(--shadow);
 }
-.calc-wrap .title{
-  font-weight:800; font-size:1.15rem; margin-bottom:.25rem;
-}
-.calc-wrap .subtitle{
-  color:#334155; margin-bottom:.6rem;
-}
-
-/* Selectbox e pulsante Go più evidenti */
-.calc-wrap .stSelectbox > div > div{
-  background:#fff; border-radius:12px; border:1px solid rgba(2,6,23,.08);
-}
+.calc-wrap .title{ font-weight:800; font-size:1.15rem; margin-bottom:.25rem; }
+.calc-wrap .subtitle{ color:#334155; margin-bottom:.6rem; }
 .calc-go .stButton>button{
   background: linear-gradient(135deg, var(--brand2), var(--brand1));
   color:white; border:none; border-radius:12px; padding:.6rem 1rem;
   box-shadow:0 10px 24px rgba(14,165,233,.25);
 }
 .calc-go .stButton>button:hover{ filter:brightness(1.05); transform:translateY(-1px); }
-
-/* Cards consigliate: bordo sinistro colorato e ombra morbida */
 .rec-card{
   padding:14px 16px; background:#fff; border-radius:14px;
-  border:1px solid rgba(2,6,23,.06); box-shadow:var(--shadow);
-  margin-bottom:.75rem;
+  border:1px solid rgba(2,6,23,.06); box-shadow:var(--shadow); margin-bottom:.75rem;
 }
 .rec-card:hover{ box-shadow:0 14px 28px rgba(0,0,0,.08); }
 .rec-card .title{ font-weight:700; margin-bottom:4px; }
 .rec-card .desc{ color:#475569; font-size:.92rem; margin-bottom:.6rem; }
-
 .rec-blue{ border-left:6px solid var(--brand1); }
 .rec-green{ border-left:6px solid var(--brand2); }
 .rec-violet{ border-left:6px solid var(--brand3); }
 .rec-amber{ border-left:6px solid var(--brand4); }
-
-/* Pulsanti dentro/sezione consigliati (tono chiaro coerente) */
 .rec-card .stButton>button{
   width:100%; border:none; border-radius:10px; padding:.5rem .75rem; color:#0f172a;
   background: rgba(14,165,233,.12);
@@ -116,21 +96,13 @@ st.markdown("""
 .rec-violet .stButton>button{ background: rgba(168,85,247,.12); }
 .rec-amber .stButton>button{ background: rgba(245,158,11,.12); }
 .rec-card .stButton>button:hover{ filter:brightness(1.02); }
-
-/* Menù rapido in basso */
-.quick-menu{
-  padding:14px; background:#fff; border:1px dashed rgba(15,23,42,.15);
-  border-radius:14px;
-}
-.quick-menu .stButton>button{ border-radius:10px; }
-
-/* Evidenzia metriche piccole */
+.quick-menu{ padding:14px; background:#fff; border:1px dashed rgba(15,23,42,.15); border-radius:14px; }
 [data-testid="stMetricValue"]{ color:#0f172a; }
 </style>
 """, unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Utility locali (routing, euristiche)
+# Utility (routing, euristiche)
 # ──────────────────────────────────────────────────────────────────────────────
 KEY = "up"
 def k(name: str) -> str: return f"{KEY}_{name}"
@@ -251,12 +223,12 @@ def make_sample_primary(n: int = 300) -> pd.DataFrame:
     bmi = np.clip(rng.normal(27, 5, size=n), 16, 50)
     diabetes = rng.binomial(1, 0.2, size=n)
     marker = rng.normal(0, 1, size=n) - 0.2*treatment + 0.2*diabetes
-    y_cont = 70 + 1.2*treatment - 0.3*age - 0.4*bmi + 1.8*marker + rng.normal(0, 6, size=n)
+    y_cont = 70 + 1.2*treatment - 0.3*age - 0.4*bmi + 1.8*marker + np.random.normal(0, 6, size=n)
     lin = -0.5*treatment + 0.02*(age-55) + 0.03*(bmi-27) + 0.6*diabetes - 0.5*marker
-    p = 1/(1+np.exp(-lin)); y_bin = rng.binomial(1, p)
-    time_v = np.clip(rng.weibull(1.3, size=n)*24, 1, 48); event = rng.binomial(1, 0.7, size=n)
-    methodA = np.clip(1 + 0.02*age + 0.03*bmi + rng.normal(0, 0.2, size=n), 0.2, 6.0)
-    methodB = np.clip(methodA + 0.1 + rng.normal(0, 0.18, size=n), 0.2, 6.5)
+    p = 1/(1+np.exp(-lin)); y_bin = np.random.binomial(1, p)
+    time_v = np.clip(np.random.weibull(1.3, size=n)*24, 1, 48); event = np.random.binomial(1, 0.7, size=n)
+    methodA = np.clip(1 + 0.02*age + 0.03*bmi + np.random.normal(0, 0.2, size=n), 0.2, 6.0)
+    methodB = np.clip(methodA + 0.1 + np.random.normal(0, 0.18, size=n), 0.2, 6.5)
     df = pd.DataFrame({
         "id": np.arange(1, n+1),
         "treatment": treatment, "age": np.round(age,1), "bmi": np.round(bmi,1),
@@ -276,14 +248,15 @@ ss_set_default(k("encoding"), "utf-8")
 ss_set_default(k("sniff_sep"), True)
 ss_set_default(k("decimal"), ",")
 ss_set_default(k("thousands"), ".")
+ss_set_default(k("saved"), False)   # <- flag: consentire la navigazione solo dopo il salvataggio
 ensure_initialized()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Header
 # ──────────────────────────────────────────────────────────────────────────────
 st.title("📂 Importa Dataset")
-st.markdown("Carichi un file **CSV/Excel**, verifichi l’anteprima e **salvi** per le pagine successive. "
-            "Poi il sistema le suggerirà automaticamente **cosa può calcolare** in base alla struttura dei dati.")
+st.markdown("Carichi un file **CSV/Excel**, verifichi l’anteprima e **salvi**. "
+            "👉 **Solo dopo il salvataggio** potrà scegliere il modulo di analisi.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Passo 1 · Sorgente
@@ -301,6 +274,7 @@ with right:
         if uploaded is not None:
             st.success(f"Selezionato: {uploaded.name}")
             st.session_state[k("raw_file")] = uploaded
+            st.session_state[k("saved")] = False  # una nuova lettura richiederà nuovo salvataggio
     else:
         st.session_state[k("source")] = "sample"
         sample_kind = st.selectbox("Selezioni un esempio", ["Studio primario (consigliato)", "Iris (semplice)"], key=k("sample_kind"))
@@ -317,6 +291,7 @@ with right:
                             columns={"age":"sepal_length","bmi":"sepal_width","marker":"petal_length","y_cont":"petal_width"}
                         )
                 st.session_state[k("df")] = df.copy()
+                st.session_state[k("saved")] = False
                 st.success("Esempio caricato.")
         with c2:
             st.caption("L’esempio *Studio primario* consente di provare: descrittive, test, regressioni, ROC/PR, agreement, sopravvivenza.")
@@ -343,14 +318,15 @@ if st.button("📥 Leggi/aggiorna anteprima", use_container_width=True, key=k("r
         df = read_uploaded_file(up)
         if df is not None and not df.empty:
             st.session_state[k("df")] = df.copy()
+            st.session_state[k("saved")] = False  # è necessario salvarlo prima di procedere
             st.success(f"Letto: {df.shape[0]} righe × {df.shape[1]}")
         else:
             st.error("Lettura fallita o dataset vuoto.")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Passo 3 · Anteprima, riconoscimento struttura e salvataggio
+# Passo 3 · Anteprima, riconoscimento struttura
 # ──────────────────────────────────────────────────────────────────────────────
-st.subheader("Passo 3 · Anteprima, riconoscimento struttura e salvataggio")
+st.subheader("Passo 3 · Anteprima e riconoscimento struttura")
 df = st.session_state.get(k("df"))
 if df is None:
     st.info("Carichi/legga un dataset per proseguire."); st.stop()
@@ -361,9 +337,8 @@ with m2: st.metric("Colonne", df.shape[1])
 with m3: st.metric("Missing totali", int(df.isna().sum().sum()))
 st.dataframe(df.head(25), use_container_width=True)
 
-# Riconoscimento struttura
-def _norm(s: str) -> str: return re.sub(r"[^a-z0-9]+", "", str(s).lower())  # (ri-def per sicurezza locale)
-info = (lambda d: (lambda i: i)(detect_shape(d)))(df)
+# Riconoscimento struttura e suggerimenti (visibili, ma clic bloccati finché non si salva)
+info = detect_shape(df)
 topics = detect_topics(df)
 badge_map = {
     "wide": "🟦 Wide (una riga per soggetto, misure in colonne)",
@@ -377,7 +352,28 @@ with cB: st.caption(f"ID stimato: **{info['id'] or '—'}**  •  Tempo: **{info
 with cC:
     if info["notes"]: st.caption("Note: " + " · ".join(info["notes"]))
 
-# Consigliati in base ai dati (card colorate)
+# ──────────────────────────────────────────────────────────────────────────────
+# NUOVO: Passo 4 · Salva (obbligatorio prima di scegliere il modulo)
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.subheader("Passo 4 · 💾 Salva il dataset (obbligatorio)")
+cS1, cS2 = st.columns([1.5, 2])
+with cS1:
+    if st.button("💾 Salva per le altre pagine", use_container_width=True, key=k("save")):
+        set_uploaded(df, note="from upload page")
+        st.session_state[k("saved")] = True
+        st.success("Dataset salvato come ‘uploaded’ e impostato come ‘active’. Ora può scegliere il modulo.")
+with cS2:
+    if not ss_get(k("saved"), False):
+        st.warning("⚠️ Per poter proseguire, salvi prima il dataset con il pulsante a sinistra.")
+with st.expander("Stato dati", expanded=False):
+    stamp_meta()
+
+saved_ok = bool(ss_get(k("saved"), False))
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Consigliati per i tuoi dati (BLOCCATI finché non salvato)
+# ──────────────────────────────────────────────────────────────────────────────
 st.markdown("#### ✅ Consigliati per i tuoi dati")
 rec_cards = []
 def add_card(label: str, desc: str, color: str, primary: list[str], tokens: list[str]):
@@ -431,15 +427,21 @@ if "timeseries" in topics:
 with st.expander("Opzioni avanzate"):
     adv1, adv2 = st.columns(2)
     with adv1:
-        if st.button("🧩 SEM — Modelli di equazioni strutturali", use_container_width=True, key=k("go_sem")):
-            set_uploaded(df, note="from upload page"); safe_switch_by_tokens(
-                ["16_🧩_SEM_Structural_Equation_Modeling.py"], ["sem","equation"])
+        st.button("🧩 SEM — Modelli di equazioni strutturali",
+                  use_container_width=True, key=k("go_sem"),
+                  disabled=not saved_ok,
+                  on_click=(lambda: (set_uploaded(df, "from upload page"), safe_switch_by_tokens(
+                      ["16_🧩_SEM_Structural_Equation_Modeling.py"], ["sem","equation"]
+                  ))) if saved_ok else None)
     with adv2:
-        if st.button("🧪 Meta-analisi", use_container_width=True, key=k("go_meta")):
-            set_uploaded(df, note="from upload page"); safe_switch_by_tokens(
-                ["17_🧪_Meta_Analysis.py", "16_🧪_Meta_Analysis.py"], ["meta","analysis"])
+        st.button("🧪 Meta-analisi",
+                  use_container_width=True, key=k("go_meta"),
+                  disabled=not saved_ok,
+                  on_click=(lambda: (set_uploaded(df, "from upload page"), safe_switch_by_tokens(
+                      ["17_🧪_Meta_Analysis.py", "16_🧪_Meta_Analysis.py"], ["meta","analysis"]
+                  ))) if saved_ok else None)
 
-# Griglia card consigliate (con stile colorato)
+# Griglia card consigliate (con stile colorato) — DISABILITATE se non salvato
 if rec_cards:
     rows = (len(rec_cards)+2)//3
     idx = 0
@@ -453,14 +455,14 @@ if rec_cards:
                             f"<div class='title'>{label}</div>"
                             f"<div class='desc'>{desc}</div>"
                             f"</div>", unsafe_allow_html=True)
-                # Il bottone è subito sotto la card così eredita il contesto visivo
-                if st.button(label, use_container_width=True, key=k(f"rec_{idx}")):
-                    set_uploaded(df, note="from upload page")
-                    safe_switch_by_tokens(prim, toks)
+                st.button(label, use_container_width=True, key=k(f"rec_{idx}"),
+                          disabled=not saved_ok,
+                          on_click=(lambda p=prim, t=toks: (set_uploaded(df, "from upload page"),
+                                                            safe_switch_by_tokens(p, t))) if saved_ok else None)
             idx += 1
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Menù accattivante: “Cosa vuoi calcolare?” (sezione più colorata)
+# Menù accattivante: “Cosa vuoi calcolare?” (DISABILITATO finché non salvato)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.markdown("<div class='calc-wrap'>"
@@ -485,17 +487,13 @@ opt = st.selectbox(
         "SEM — Equazioni strutturali",
         "Meta-analisi"
     ],
-    index=0, key=k("goal")
+    index=0, key=k("goal"),
+    disabled=not saved_ok
 )
 
-col_go = st.container()
-with col_go:
-    st.markdown("</div>", unsafe_allow_html=True)  # chiusura calc-wrap
-
 st.markdown("<div class='calc-go'>", unsafe_allow_html=True)
-go = st.button("➡️ Vai al modulo", use_container_width=True, key=k("go_goal"))
+go = st.button("➡️ Vai al modulo", use_container_width=True, key=k("go_goal"), disabled=not saved_ok)
 st.markdown("</div>", unsafe_allow_html=True)
-
 if go and opt != "— Seleziona —":
     set_uploaded(df, note="from upload page")
     route = {
@@ -516,25 +514,25 @@ if go and opt != "— Seleziona —":
     safe_switch_by_tokens(prim, toks)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Salvataggio rapido (con box visivo)
+# (Opzionale) Menù rapido classico — anche qui bloccato finché non salvato
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.subheader("💾 Salvataggio rapido")
+st.subheader("🔏 Navigazione rapida (disponibile dopo il salvataggio)")
 st.markdown("<div class='quick-menu'>", unsafe_allow_html=True)
 b1, b2, b3 = st.columns([1.5, 1.2, 1.2])
 with b1:
-    if st.button("💾 Salva per le altre pagine", use_container_width=True, key=k("save")):
-        set_uploaded(df, note="from upload page")
-        st.success("Salvato come ‘uploaded’ e impostato come ‘active’.")
+    st.button("💾 Salva per le altre pagine", use_container_width=True, key=k("save_dup"),
+              on_click=(lambda: (set_uploaded(df, "from upload page"),
+                                 st.session_state.__setitem__(k("saved"), True))),
+              disabled=saved_ok)
 with b2:
-    if st.button("🧹 Vai a: Pulizia dati", use_container_width=True, key=k("go_clean")):
-        set_uploaded(df, note="from upload page")
-        st.switch_page("pages/1_🧹_Data_Cleaning.py")
+    st.button("🧹 Vai a: Pulizia dati", use_container_width=True, key=k("go_clean"),
+              disabled=not saved_ok,
+              on_click=(lambda: (set_uploaded(df, "from upload page"),
+                                 safe_switch_by_tokens(["1_🧹_Data_Cleaning.py"], ["cleaning","pulizia"]))) if saved_ok else None)
 with b3:
-    if st.button("📈 Vai a: Descrittive", use_container_width=True, key=k("go_desc")):
-        set_uploaded(df, note="from upload page")
-        st.switch_page("pages/2_📈_Descriptive_Statistics.py")
+    st.button("📈 Vai a: Descrittive", use_container_width=True, key=k("go_desc"),
+              disabled=not saved_ok,
+              on_click=(lambda: (set_uploaded(df, "from upload page"),
+                                 safe_switch_by_tokens(["2_📈_Descriptive_Statistics.py"], ["descriptive","statistiche"]))) if saved_ok else None)
 st.markdown("</div>", unsafe_allow_html=True)
-
-with st.expander("Stato dati", expanded=False):
-    stamp_meta()
