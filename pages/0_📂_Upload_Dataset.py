@@ -61,6 +61,7 @@ st.markdown("""
   --brand3:#a855f7;  /* viola  */
   --brand4:#f59e0b;  /* ambra  */
   --bg-grad: linear-gradient(135deg, rgba(14,165,233,.12), rgba(34,197,94,.12));
+  --rec-bg: linear-gradient(135deg, rgba(245,158,11,.08), rgba(14,165,233,.06)); /* sfondo consigliati */
   --card-bg:#ffffff;
   --shadow:0 8px 22px rgba(0,0,0,.06);
   --radius:18px;
@@ -77,6 +78,17 @@ st.markdown("""
   box-shadow:0 10px 24px rgba(14,165,233,.25);
 }
 .calc-go .stButton>button:hover{ filter:brightness(1.05); transform:translateY(-1px); }
+
+/* Contenitore consigliati (nuovo sfondo) */
+.rec-wrap{
+  padding:18px 18px 12px;
+  background: var(--rec-bg);
+  border:1px solid rgba(15,23,42,.08);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  margin-top: .5rem;
+}
+
 .rec-card{
   padding:14px 16px; background:#fff; border-radius:14px;
   border:1px solid rgba(2,6,23,.06); box-shadow:var(--shadow); margin-bottom:.75rem;
@@ -96,6 +108,7 @@ st.markdown("""
 .rec-violet .stButton>button{ background: rgba(168,85,247,.12); }
 .rec-amber .stButton>button{ background: rgba(245,158,11,.12); }
 .rec-card .stButton>button:hover{ filter:brightness(1.02); }
+
 .quick-menu{ padding:14px; background:#fff; border:1px dashed rgba(15,23,42,.15); border-radius:14px; }
 [data-testid="stMetricValue"]{ color:#0f172a; }
 </style>
@@ -160,7 +173,7 @@ def detect_shape(df: pd.DataFrame):
         info["shape"] = "long"
     if (not idc) and tcol and len(df) >= 20:
         info["shape"] = "time-series"
-    pattern = re.compile(r".*(_t\d+|_m\d+|_v\d+|_visit\d+|_time\d+)$", re.IGNORECASE)
+    pattern = re.compile(r".*(_t\\d+|_m\\d+|_v\\d+|_visit\\d+|_time\\d+)$", re.IGNORECASE)
     if any(pattern.match(c) for c in df.columns):
         if info["shape"] != "long": info["shape"] = "wide"
         info["notes"].append("Rilevati suffissi temporali nelle colonne")
@@ -248,7 +261,7 @@ ss_set_default(k("encoding"), "utf-8")
 ss_set_default(k("sniff_sep"), True)
 ss_set_default(k("decimal"), ",")
 ss_set_default(k("thousands"), ".")
-ss_set_default(k("saved"), False)   # <- flag: consentire la navigazione solo dopo il salvataggio
+ss_set_default(k("saved"), False)   # flag: consentire la navigazione solo dopo il salvataggio
 ensure_initialized()
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -274,7 +287,7 @@ with right:
         if uploaded is not None:
             st.success(f"Selezionato: {uploaded.name}")
             st.session_state[k("raw_file")] = uploaded
-            st.session_state[k("saved")] = False  # una nuova lettura richiederà nuovo salvataggio
+            st.session_state[k("saved")] = False  # nuova lettura ⇒ serve nuovo salvataggio
     else:
         st.session_state[k("source")] = "sample"
         sample_kind = st.selectbox("Selezioni un esempio", ["Studio primario (consigliato)", "Iris (semplice)"], key=k("sample_kind"))
@@ -318,13 +331,13 @@ if st.button("📥 Leggi/aggiorna anteprima", use_container_width=True, key=k("r
         df = read_uploaded_file(up)
         if df is not None and not df.empty:
             st.session_state[k("df")] = df.copy()
-            st.session_state[k("saved")] = False  # è necessario salvarlo prima di procedere
+            st.session_state[k("saved")] = False
             st.success(f"Letto: {df.shape[0]} righe × {df.shape[1]}")
         else:
             st.error("Lettura fallita o dataset vuoto.")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Passo 3 · Anteprima, riconoscimento struttura
+# Passo 3 · Anteprima e riconoscimento
 # ──────────────────────────────────────────────────────────────────────────────
 st.subheader("Passo 3 · Anteprima e riconoscimento struttura")
 df = st.session_state.get(k("df"))
@@ -337,7 +350,6 @@ with m2: st.metric("Colonne", df.shape[1])
 with m3: st.metric("Missing totali", int(df.isna().sum().sum()))
 st.dataframe(df.head(25), use_container_width=True)
 
-# Riconoscimento struttura e suggerimenti (visibili, ma clic bloccati finché non si salva)
 info = detect_shape(df)
 topics = detect_topics(df)
 badge_map = {
@@ -353,7 +365,7 @@ with cC:
     if info["notes"]: st.caption("Note: " + " · ".join(info["notes"]))
 
 # ──────────────────────────────────────────────────────────────────────────────
-# NUOVO: Passo 4 · Salva (obbligatorio prima di scegliere il modulo)
+# Passo 4 · Salva (obbligatorio)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.subheader("Passo 4 · 💾 Salva il dataset (obbligatorio)")
@@ -372,9 +384,16 @@ with st.expander("Stato dati", expanded=False):
 saved_ok = bool(ss_get(k("saved"), False))
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Consigliati per i tuoi dati (BLOCCATI finché non salvato)
+# Divisore netto tra salvataggio e suggerimenti (richiesta)
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown("---")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Consigliati per i tuoi dati (in riquadro con sfondo dedicato)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("#### ✅ Consigliati per i tuoi dati")
+st.markdown("<div class='rec-wrap'>", unsafe_allow_html=True)
+
 rec_cards = []
 def add_card(label: str, desc: str, color: str, primary: list[str], tokens: list[str]):
     rec_cards.append((label, desc, color, primary, tokens))
@@ -423,25 +442,7 @@ if "timeseries" in topics:
     add_card("⏱️ Serie temporali", "ARIMA/ETS, decomposizione, previsione.", "rec-violet",
              ["14_⏱️_Analisi_Serie_Temporali.py"], ["serie","temporali"])
 
-# SEM e Meta (avanzati)
-with st.expander("Opzioni avanzate"):
-    adv1, adv2 = st.columns(2)
-    with adv1:
-        st.button("🧩 SEM — Modelli di equazioni strutturali",
-                  use_container_width=True, key=k("go_sem"),
-                  disabled=not saved_ok,
-                  on_click=(lambda: (set_uploaded(df, "from upload page"), safe_switch_by_tokens(
-                      ["16_🧩_SEM_Structural_Equation_Modeling.py"], ["sem","equation"]
-                  ))) if saved_ok else None)
-    with adv2:
-        st.button("🧪 Meta-analisi",
-                  use_container_width=True, key=k("go_meta"),
-                  disabled=not saved_ok,
-                  on_click=(lambda: (set_uploaded(df, "from upload page"), safe_switch_by_tokens(
-                      ["17_🧪_Meta_Analysis.py", "16_🧪_Meta_Analysis.py"], ["meta","analysis"]
-                  ))) if saved_ok else None)
-
-# Griglia card consigliate (con stile colorato) — DISABILITATE se non salvato
+# Griglia cards consigliate (DISABILITATE se non salvato)
 if rec_cards:
     rows = (len(rec_cards)+2)//3
     idx = 0
@@ -460,6 +461,28 @@ if rec_cards:
                           on_click=(lambda p=prim, t=toks: (set_uploaded(df, "from upload page"),
                                                             safe_switch_by_tokens(p, t))) if saved_ok else None)
             idx += 1
+
+st.markdown("</div>", unsafe_allow_html=True)  # chiusura rec-wrap
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Opzioni avanzate — spostate sotto le statistiche consigliate (richiesta)
+# ──────────────────────────────────────────────────────────────────────────────
+with st.expander("Opzioni avanzate (SEM, Meta-analisi)"):
+    adv1, adv2 = st.columns(2)
+    with adv1:
+        st.button("🧩 SEM — Modelli di equazioni strutturali",
+                  use_container_width=True, key=k("go_sem"),
+                  disabled=not saved_ok,
+                  on_click=(lambda: (set_uploaded(df, "from upload page"), safe_switch_by_tokens(
+                      ["16_🧩_SEM_Structural_Equation_Modeling.py"], ["sem","equation"]
+                  ))) if saved_ok else None)
+    with adv2:
+        st.button("🧪 Meta-analisi",
+                  use_container_width=True, key=k("go_meta"),
+                  disabled=not saved_ok,
+                  on_click=(lambda: (set_uploaded(df, "from upload page"), safe_switch_by_tokens(
+                      ["17_🧪_Meta_Analysis.py", "16_🧪_Meta_Analysis.py"], ["meta","analysis"]
+                  ))) if saved_ok else None)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Menù accattivante: “Cosa vuoi calcolare?” (DISABILITATO finché non salvato)
@@ -514,7 +537,7 @@ if go and opt != "— Seleziona —":
     safe_switch_by_tokens(prim, toks)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# (Opzionale) Menù rapido classico — anche qui bloccato finché non salvato
+# Navigazione rapida (opzionale)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.subheader("🔏 Navigazione rapida (disponibile dopo il salvataggio)")
