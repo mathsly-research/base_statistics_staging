@@ -11,7 +11,6 @@ import streamlit as st
 try:
     from data_store import ensure_initialized, set_uploaded, stamp_meta
 except Exception:
-    # Fallback con stesse chiavi/semantica (se manca data_store.py)
     def ensure_initialized():
         st.session_state.setdefault("ds_active_df", None)
         st.session_state.setdefault("ds_uploaded_df", None)
@@ -19,9 +18,8 @@ except Exception:
     def set_uploaded(df: pd.DataFrame, note: str = ""):
         ensure_initialized()
         st.session_state["ds_uploaded_df"] = df.copy()
-        # In upload impostiamo anche l'attivo
-        meta = st.session_state["ds_meta"]
         st.session_state["ds_active_df"] = df.copy()
+        meta = st.session_state["ds_meta"]
         meta["version"] = int(meta.get("version", 0)) + 1
         meta["updated_at"] = int(time.time())
         meta["source"] = "upload"
@@ -53,7 +51,86 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Utility locali (routing, heuristics, ecc.)
+# STILE: palette e componenti (colorato + coerente)
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+:root{
+  --brand1:#0ea5e9;  /* azzurro */
+  --brand2:#22c55e;  /* verde  */
+  --brand3:#a855f7;  /* viola  */
+  --brand4:#f59e0b;  /* ambra  */
+  --bg-grad: linear-gradient(135deg, rgba(14,165,233,.12), rgba(34,197,94,.12));
+  --card-bg:#ffffff;
+  --shadow:0 8px 22px rgba(0,0,0,.06);
+  --radius:18px;
+}
+
+/* Contenitore domanda "Cosa vuoi calcolare" */
+.calc-wrap{
+  padding:22px 22px 18px;
+  background: var(--bg-grad);
+  border-radius: var(--radius);
+  border:1px solid rgba(15,23,42,.08);
+  box-shadow: var(--shadow);
+}
+.calc-wrap .title{
+  font-weight:800; font-size:1.15rem; margin-bottom:.25rem;
+}
+.calc-wrap .subtitle{
+  color:#334155; margin-bottom:.6rem;
+}
+
+/* Selectbox e pulsante Go più evidenti */
+.calc-wrap .stSelectbox > div > div{
+  background:#fff; border-radius:12px; border:1px solid rgba(2,6,23,.08);
+}
+.calc-go .stButton>button{
+  background: linear-gradient(135deg, var(--brand2), var(--brand1));
+  color:white; border:none; border-radius:12px; padding:.6rem 1rem;
+  box-shadow:0 10px 24px rgba(14,165,233,.25);
+}
+.calc-go .stButton>button:hover{ filter:brightness(1.05); transform:translateY(-1px); }
+
+/* Cards consigliate: bordo sinistro colorato e ombra morbida */
+.rec-card{
+  padding:14px 16px; background:#fff; border-radius:14px;
+  border:1px solid rgba(2,6,23,.06); box-shadow:var(--shadow);
+  margin-bottom:.75rem;
+}
+.rec-card:hover{ box-shadow:0 14px 28px rgba(0,0,0,.08); }
+.rec-card .title{ font-weight:700; margin-bottom:4px; }
+.rec-card .desc{ color:#475569; font-size:.92rem; margin-bottom:.6rem; }
+
+.rec-blue{ border-left:6px solid var(--brand1); }
+.rec-green{ border-left:6px solid var(--brand2); }
+.rec-violet{ border-left:6px solid var(--brand3); }
+.rec-amber{ border-left:6px solid var(--brand4); }
+
+/* Pulsanti dentro/sezione consigliati (tono chiaro coerente) */
+.rec-card .stButton>button{
+  width:100%; border:none; border-radius:10px; padding:.5rem .75rem; color:#0f172a;
+  background: rgba(14,165,233,.12);
+}
+.rec-green .stButton>button{ background: rgba(34,197,94,.12); }
+.rec-violet .stButton>button{ background: rgba(168,85,247,.12); }
+.rec-amber .stButton>button{ background: rgba(245,158,11,.12); }
+.rec-card .stButton>button:hover{ filter:brightness(1.02); }
+
+/* Menù rapido in basso */
+.quick-menu{
+  padding:14px; background:#fff; border:1px dashed rgba(15,23,42,.15);
+  border-radius:14px;
+}
+.quick-menu .stButton>button{ border-radius:10px; }
+
+/* Evidenzia metriche piccole */
+[data-testid="stMetricValue"]{ color:#0f172a; }
+</style>
+""", unsafe_allow_html=True)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Utility locali (routing, euristiche)
 # ──────────────────────────────────────────────────────────────────────────────
 KEY = "up"
 def k(name: str) -> str: return f"{KEY}_{name}"
@@ -80,7 +157,6 @@ def is_binary_series(s: pd.Series) -> bool:
     if pd.api.types.is_bool_dtype(s): return True
     vals = pd.unique(s.dropna())
     if len(vals) == 2:
-        # Consente {0,1} o due etichette
         if pd.api.types.is_numeric_dtype(s):
             return set(np.sort(vals)) <= {0,1}
         return True
@@ -89,7 +165,6 @@ def is_binary_series(s: pd.Series) -> bool:
 def guess_id_col(df: pd.DataFrame):
     cand = [c for c in df.columns if _norm(c) in {"id","subject","patient","case","unit"}]
     if cand: return cand[0]
-    # alta cardinalità ≈ id
     ratios = {c: df[c].nunique(dropna=True)/len(df) for c in df.columns}
     hi = [c for c,r in ratios.items() if r>0.8 and r<1.01]
     return hi[0] if hi else None
@@ -99,7 +174,6 @@ def guess_time_col(df: pd.DataFrame):
     for n in names:
         for c in df.columns:
             if _norm(n) == _norm(c): return c
-    # pattern suffix numerici in wide non hanno colonna tempo; qui proviamo date-like
     for c in df.columns:
         if pd.api.types.is_datetime64_any_dtype(df[c]): return c
     return None
@@ -108,58 +182,33 @@ def detect_shape(df: pd.DataFrame):
     info = {"shape": "wide", "id": None, "time": None, "notes": []}
     idc = guess_id_col(df); tcol = guess_time_col(df)
     info["id"], info["time"] = idc, tcol
-    # LONG/PANEL se c'è id + time e ripetizioni per id
     if idc and tcol and df.duplicated([idc, tcol]).any() is False and df[idc].duplicated().any():
-        info["shape"] = "long"
-        info["notes"].append("Trovate misure ripetute per lo stesso ID")
-    # LONG se id + time e più righe per id
+        info["shape"] = "long"; info["notes"].append("Trovate misure ripetute per lo stesso ID")
     if idc and tcol and df.groupby(idc).size().max() > 1:
         info["shape"] = "long"
-    # TIME SERIES se non c'è id ma c'è una colonna temporale e molte righe
     if (not idc) and tcol and len(df) >= 20:
         info["shape"] = "time-series"
-    # WIDE se colonne con suffissi temporali
     pattern = re.compile(r".*(_t\d+|_m\d+|_v\d+|_visit\d+|_time\d+)$", re.IGNORECASE)
     if any(pattern.match(c) for c in df.columns):
-        if info["shape"] != "long":
-            info["shape"] = "wide"
+        if info["shape"] != "long": info["shape"] = "wide"
         info["notes"].append("Rilevati suffissi temporali nelle colonne")
     return info
 
 def detect_topics(df: pd.DataFrame):
-    """Riconosce aree d'analisi plausibili."""
-    topics = set()
-    cols = df.columns
-    # Sopravvivenza
+    topics = set(); cols = df.columns
     if "time" in cols and "event" in cols and is_binary_series(df["event"]) and pd.api.types.is_numeric_dtype(df["time"]):
         topics.add("survival")
-    # Diagnostica (ROC/PR): variabile binaria + score/prob
     bin_cols = [c for c in cols if is_binary_series(df[c])]
     score_like = [c for c in cols if any(t in _norm(c) for t in ["score","prob","p_hat","marker","index","test"])]
-    if bin_cols and score_like:
-        topics.add("diagnostics")
-    # Agreement
-    if set(["methoda","methodb"]).issubset({_norm(c) for c in cols}):
-        topics.add("agreement")
-    # Regressioni (lineare/logistica)
-    if any(pd.api.types.is_numeric_dtype(df[c]) for c in cols):
-        topics.add("regression")
-    if bin_cols:
-        topics.add("logistic")
-    # Descrittive e test
-    topics.add("descriptives")
-    topics.add("tests")
-    # Longitudinale / Panel
+    if bin_cols and score_like: topics.add("diagnostics")
+    if set(["methoda","methodb"]).issubset({_norm(c) for c in cols}): topics.add("agreement")
+    if any(pd.api.types.is_numeric_dtype(df[c]) for c in cols): topics.add("regression")
+    if bin_cols: topics.add("logistic")
+    topics.update({"descriptives","tests"})
     sh = detect_shape(df)["shape"]
-    if sh == "long":
-        topics.add("longitudinal")
-        topics.add("panel")
-    # Serie temporali
-    if sh == "time-series":
-        topics.add("timeseries")
-    # Correlazioni
-    if sum(pd.api.types.is_numeric_dtype(df[c]) for c in cols) >= 2:
-        topics.add("correlation")
+    if sh == "long": topics.update({"longitudinal","panel"})
+    if sh == "time-series": topics.add("timeseries")
+    if sum(pd.api.types.is_numeric_dtype(df[c]) for c in cols) >= 2: topics.add("correlation")
     return topics
 
 def read_uploaded_file(file) -> pd.DataFrame | None:
@@ -173,7 +222,6 @@ def read_uploaded_file(file) -> pd.DataFrame | None:
                 df = pd.read_csv(io.BytesIO(data), encoding=ss_get(k("encoding")), sep=",")
         except Exception:
             df = pd.read_csv(io.BytesIO(data), encoding=ss_get(k("encoding")), sep=";")
-        # conversione numerica eur/us
         dec, tho = ss_get(k("decimal")), ss_get(k("thousands"))
         if dec in [",", "."] and tho in [",", ".", " "]:
             for c in df.columns:
@@ -192,14 +240,11 @@ def read_uploaded_file(file) -> pd.DataFrame | None:
             df = pd.read_excel(xls, sheet_name=sheet, header=0)
             return df
         except Exception as e:
-            st.error(f"Errore Excel: {e}")
-            return None
+            st.error(f"Errore Excel: {e}"); return None
     else:
-        st.error("Formato non supportato.")
-        return None
+        st.error("Formato non supportato."); return None
 
 def make_sample_primary(n: int = 300) -> pd.DataFrame:
-    """Mini dataset di studio primario (coerente con i moduli)."""
     rng = np.random.default_rng(7)
     treatment = rng.integers(0, 2, size=n)
     age = np.clip(rng.normal(55, 12, size=n), 18, 90)
@@ -208,10 +253,8 @@ def make_sample_primary(n: int = 300) -> pd.DataFrame:
     marker = rng.normal(0, 1, size=n) - 0.2*treatment + 0.2*diabetes
     y_cont = 70 + 1.2*treatment - 0.3*age - 0.4*bmi + 1.8*marker + rng.normal(0, 6, size=n)
     lin = -0.5*treatment + 0.02*(age-55) + 0.03*(bmi-27) + 0.6*diabetes - 0.5*marker
-    p = 1/(1+np.exp(-lin))
-    y_bin = rng.binomial(1, p)
-    time = np.clip(rng.weibull(1.3, size=n)*24, 1, 48)
-    event = rng.binomial(1, 0.7, size=n)
+    p = 1/(1+np.exp(-lin)); y_bin = rng.binomial(1, p)
+    time_v = np.clip(rng.weibull(1.3, size=n)*24, 1, 48); event = rng.binomial(1, 0.7, size=n)
     methodA = np.clip(1 + 0.02*age + 0.03*bmi + rng.normal(0, 0.2, size=n), 0.2, 6.0)
     methodB = np.clip(methodA + 0.1 + rng.normal(0, 0.18, size=n), 0.2, 6.5)
     df = pd.DataFrame({
@@ -219,7 +262,7 @@ def make_sample_primary(n: int = 300) -> pd.DataFrame:
         "treatment": treatment, "age": np.round(age,1), "bmi": np.round(bmi,1),
         "diabetes": diabetes, "marker": np.round(marker,3),
         "y_cont": np.round(y_cont,2), "y_bin": y_bin,
-        "time": np.round(time,2), "event": event,
+        "time": np.round(time_v,2), "event": event,
         "methodA": np.round(methodA,3), "methodB": np.round(methodB,3)
     })
     return df
@@ -240,7 +283,7 @@ ensure_initialized()
 # ──────────────────────────────────────────────────────────────────────────────
 st.title("📂 Importa Dataset")
 st.markdown("Carichi un file **CSV/Excel**, verifichi l’anteprima e **salvi** per le pagine successive. "
-            "Poi le suggeriremo in automatico **cosa può calcolare** in base alla struttura dei dati.")
+            "Poi il sistema le suggerirà automaticamente **cosa può calcolare** in base alla struttura dei dati.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Passo 1 · Sorgente
@@ -267,7 +310,6 @@ with right:
                 if sample_kind.startswith("Studio primario"):
                     df = make_sample_primary(280)
                 else:
-                    # Iris da web potrebbe non essere sempre disponibile: fallback sintetico
                     try:
                         df = pd.read_csv("https://raw.githubusercontent.com/mwaskom/seaborn-data/master/iris.csv")
                     except Exception:
@@ -277,8 +319,7 @@ with right:
                 st.session_state[k("df")] = df.copy()
                 st.success("Esempio caricato.")
         with c2:
-            st.caption("L’esempio *Studio primario* è pensato per testare: descrittive, test, regressioni, "
-                       "ROC/PR, agreement, sopravvivenza e (se convertito in long) longitudinale/panel.")
+            st.caption("L’esempio *Studio primario* consente di provare: descrittive, test, regressioni, ROC/PR, agreement, sopravvivenza.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Passo 2 · Opzioni lettura
@@ -312,8 +353,7 @@ if st.button("📥 Leggi/aggiorna anteprima", use_container_width=True, key=k("r
 st.subheader("Passo 3 · Anteprima, riconoscimento struttura e salvataggio")
 df = st.session_state.get(k("df"))
 if df is None:
-    st.info("Carichi/legga un dataset per proseguire.")
-    st.stop()
+    st.info("Carichi/legga un dataset per proseguire."); st.stop()
 
 m1, m2, m3 = st.columns(3)
 with m1: st.metric("Righe", df.shape[0])
@@ -322,9 +362,9 @@ with m3: st.metric("Missing totali", int(df.isna().sum().sum()))
 st.dataframe(df.head(25), use_container_width=True)
 
 # Riconoscimento struttura
-info = detect_shape(df)
+def _norm(s: str) -> str: return re.sub(r"[^a-z0-9]+", "", str(s).lower())  # (ri-def per sicurezza locale)
+info = (lambda d: (lambda i: i)(detect_shape(d)))(df)
 topics = detect_topics(df)
-
 badge_map = {
     "wide": "🟦 Wide (una riga per soggetto, misure in colonne)",
     "long": "🟩 Long / Panel (più righe per soggetto nel tempo)",
@@ -332,80 +372,74 @@ badge_map = {
 }
 st.markdown("#### 🔎 Riconoscimento automatico")
 cA, cB, cC = st.columns([1.4, 1.4, 1.2])
-with cA:
-    st.info(badge_map.get(info["shape"], "Formato non determinato"))
-with cB:
-    st.caption(f"ID stimato: **{info['id'] or '—'}**  •  Tempo: **{info['time'] or '—'}**")
+with cA: st.info(badge_map.get(info["shape"], "Formato non determinato"))
+with cB: st.caption(f"ID stimato: **{info['id'] or '—'}**  •  Tempo: **{info['time'] or '—'}**")
 with cC:
-    if info["notes"]:
-        st.caption("Note: " + " · ".join(info["notes"]))
+    if info["notes"]: st.caption("Note: " + " · ".join(info["notes"]))
 
-# Consigliati in base ai dati
+# Consigliati in base ai dati (card colorate)
 st.markdown("#### ✅ Consigliati per i tuoi dati")
 rec_cards = []
-
-def add_card(label: str, help_txt: str, primary: list[str], tokens: list[str]):
-    rec_cards.append((label, help_txt, primary, tokens))
+def add_card(label: str, desc: str, color: str, primary: list[str], tokens: list[str]):
+    rec_cards.append((label, desc, color, primary, tokens))
 
 # Base
-add_card("📈 Statistiche descrittive", "Tabelle e grafici di base (continue e categoriche).",
+add_card("📈 Statistiche descrittive", "Tabelle e grafici di base (continue e categoriche).", "rec-blue",
          ["2_📈_Descriptive_Statistics.py"], ["descriptive","statistiche"])
-add_card("🧪 Test statistici", "t-test, ANOVA, χ² e non parametrici.",
+add_card("🧪 Test statistici", "t-test, ANOVA, χ² e non parametrici.", "rec-amber",
          ["5_🧪_Statistical_Tests.py"], ["test","statistici"])
-add_card("🔗 Correlazioni", "Matrice di correlazione, heatmap e p-value.",
+add_card("🔗 Correlazioni", "Matrice di correlazione, heatmap e p-value.", "rec-violet",
          ["6_🔗_Correlation_Analysis.py"], ["correlation","correlazioni"])
 
 # Regressioni
 if "regression" in topics:
-    add_card("📉 Regressione lineare", "Modello lineare per outcome continuo (es. y_cont).",
+    add_card("📉 Regressione lineare", "Modello lineare per outcome continuo.", "rec-green",
              ["8_🧮_Regression.py"], ["regression","lineare"])
 if "logistic" in topics:
-    add_card("📈 Regressione logistica", "Modello logit per outcome binario (es. y_bin).",
+    add_card("📈 Regressione logistica", "Modello logit per outcome binario.", "rec-blue",
              ["8_🧮_Regression.py"], ["regression","logistica"])
 
 # Diagnostici
 if "diagnostics" in topics:
-    add_card("🔬 Test diagnostici (ROC/PR)", "Curve ROC/PR, sensibilità/specificità, soglia ottimale.",
+    add_card("🔬 Test diagnostici (ROC/PR)", "Curve ROC/PR, sensibilità/specificità, soglia ottimale.", "rec-amber",
              ["9_🔬_Analisi_Test_Diagnostici.py"], ["diagnostici","roc"])
 
 # Agreement
 if "agreement" in topics:
-    add_card("📏 Agreement (Bland–Altman)", "Bias, LoA e grafici per due metodi.",
+    add_card("📏 Agreement (Bland–Altman)", "Bias, LoA e grafici per due metodi.", "rec-violet",
              ["10_📏_Agreement.py"], ["agreement","bland"])
 
 # Sopravvivenza
 if "survival" in topics:
-    add_card("🧭 Sopravvivenza", "Curve di Kaplan–Meier, Cox, numeri a rischio.",
+    add_card("🧭 Sopravvivenza", "Kaplan–Meier, Cox, numeri a rischio.", "rec-green",
              ["11_🧭_Analisi_di_Sopravvivenza.py"], ["sopravvivenza","survival"])
 
 # Longitudinale / Panel
 if "longitudinal" in topics:
-    add_card("📈 Longitudinale (misure ripetute)", "Traiettorie e modelli ad effetti misti.",
+    add_card("📈 Longitudinale (misure ripetute)", "Traiettorie e modelli ad effetti misti.", "rec-blue",
              ["12_📈_Longitudinale_Misure_Ripetute.py"], ["longitudinale"])
 if "panel" in topics:
-    add_card("🏷️ Panel (econometria)", "Pooled/FE/RE, Hausman, robust/clustered SE.",
+    add_card("🏷️ Panel (econometria)", "Pooled/FE/RE, Hausman, robuste/clustered SE.", "rec-amber",
              ["13_📊_Panel_Analysis.py","13_📊_Panel.py"], ["panel"])
 
 # Serie temporali
 if "timeseries" in topics:
-    add_card("⏱️ Serie temporali", "ARIMA/ETS, decomposizione, previsione.",
+    add_card("⏱️ Serie temporali", "ARIMA/ETS, decomposizione, previsione.", "rec-violet",
              ["14_⏱️_Analisi_Serie_Temporali.py"], ["serie","temporali"])
 
-# SEM e Meta (sempre disponibili, ma messi come “avanzati”)
+# SEM e Meta (avanzati)
 with st.expander("Opzioni avanzate"):
     adv1, adv2 = st.columns(2)
     with adv1:
         if st.button("🧩 SEM — Modelli di equazioni strutturali", use_container_width=True, key=k("go_sem")):
             set_uploaded(df, note="from upload page"); safe_switch_by_tokens(
-                ["16_🧩_SEM_Structural_Equation_Modeling.py"], ["sem","equation"]
-            )
+                ["16_🧩_SEM_Structural_Equation_Modeling.py"], ["sem","equation"])
     with adv2:
         if st.button("🧪 Meta-analisi", use_container_width=True, key=k("go_meta")):
             set_uploaded(df, note="from upload page"); safe_switch_by_tokens(
-                ["17_🧪_Meta_Analysis.py", "16_🧪_Meta_Analysis.py"], ["meta","analysis"]
-            )
+                ["17_🧪_Meta_Analysis.py", "16_🧪_Meta_Analysis.py"], ["meta","analysis"])
 
-# Visualizza cards consigliate in griglia
+# Griglia card consigliate (con stile colorato)
 if rec_cards:
     rows = (len(rec_cards)+2)//3
     idx = 0
@@ -413,20 +447,26 @@ if rec_cards:
         c1, c2, c3 = st.columns(3)
         for col in (c1, c2, c3):
             if idx >= len(rec_cards): continue
-            label, help_txt, prim, toks = rec_cards[idx]
+            label, desc, color, prim, toks = rec_cards[idx]
             with col:
-                st.caption(help_txt)
+                st.markdown(f"<div class='rec-card {color}'>"
+                            f"<div class='title'>{label}</div>"
+                            f"<div class='desc'>{desc}</div>"
+                            f"</div>", unsafe_allow_html=True)
+                # Il bottone è subito sotto la card così eredita il contesto visivo
                 if st.button(label, use_container_width=True, key=k(f"rec_{idx}")):
                     set_uploaded(df, note="from upload page")
                     safe_switch_by_tokens(prim, toks)
             idx += 1
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Menù accattivante: “Cosa vuoi calcolare?”
+# Menù accattivante: “Cosa vuoi calcolare?” (sezione più colorata)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.subheader("❓ Cosa vuoi calcolare?")
-st.markdown("Selezioni l’obiettivo: la porteremo **passo passo** al modulo giusto.")
+st.markdown("<div class='calc-wrap'>"
+            "<div class='title'>❓ Cosa vuoi calcolare?</div>"
+            "<div class='subtitle'>Selezioni l’obiettivo: la guideremo <strong>passo passo</strong> al modulo corretto.</div>",
+            unsafe_allow_html=True)
 
 opt = st.selectbox(
     "Scegli un obiettivo",
@@ -448,7 +488,14 @@ opt = st.selectbox(
     index=0, key=k("goal")
 )
 
+col_go = st.container()
+with col_go:
+    st.markdown("</div>", unsafe_allow_html=True)  # chiusura calc-wrap
+
+st.markdown("<div class='calc-go'>", unsafe_allow_html=True)
 go = st.button("➡️ Vai al modulo", use_container_width=True, key=k("go_goal"))
+st.markdown("</div>", unsafe_allow_html=True)
+
 if go and opt != "— Seleziona —":
     set_uploaded(df, note="from upload page")
     route = {
@@ -469,10 +516,11 @@ if go and opt != "— Seleziona —":
     safe_switch_by_tokens(prim, toks)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Salvataggio e navigazione rapida classica
+# Salvataggio rapido (con box visivo)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.subheader("💾 Salvataggio rapido")
+st.markdown("<div class='quick-menu'>", unsafe_allow_html=True)
 b1, b2, b3 = st.columns([1.5, 1.2, 1.2])
 with b1:
     if st.button("💾 Salva per le altre pagine", use_container_width=True, key=k("save")):
@@ -486,6 +534,7 @@ with b3:
     if st.button("📈 Vai a: Descrittive", use_container_width=True, key=k("go_desc")):
         set_uploaded(df, note="from upload page")
         st.switch_page("pages/2_📈_Descriptive_Statistics.py")
+st.markdown("</div>", unsafe_allow_html=True)
 
 with st.expander("Stato dati", expanded=False):
     stamp_meta()
