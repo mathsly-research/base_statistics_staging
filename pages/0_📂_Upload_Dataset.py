@@ -91,10 +91,9 @@ st.markdown("""
 
 .rec-card{
   padding:14px 16px; background:#fff; border-radius:14px;
-  border:1px solid rgba(2,6,23,.06); box-shadow:var(--shadow); margin-bottom:.9rem;
-  transition: box-shadow .15s ease, transform .05s ease;
+  border:1px solid rgba(2,6,23,.06); box-shadow:var(--shadow); margin-bottom:.75rem;
 }
-.rec-card:hover{ box-shadow:0 14px 28px rgba(0,0,0,.09); transform: translateY(-1px); }
+.rec-card:hover{ box-shadow:0 14px 28px rgba(0,0,0,.08); }
 .rec-card .title{ font-weight:700; margin-bottom:4px; }
 .rec-card .desc{ color:#475569; font-size:.92rem; margin-bottom:.6rem; }
 .rec-blue{ border-left:6px solid var(--brand1); }
@@ -102,21 +101,16 @@ st.markdown("""
 .rec-violet{ border-left:6px solid var(--brand3); }
 .rec-amber{ border-left:6px solid var(--brand4); }
 .rec-card .stButton>button{
-  width:100%; border:none; border-radius:10px; padding:.55rem .8rem; color:#0f172a;
+  width:100%; border:none; border-radius:10px; padding:.5rem .75rem; color:#0f172a;
   background: rgba(14,165,233,.12);
 }
 .rec-green .stButton>button{ background: rgba(34,197,94,.12); }
 .rec-violet .stButton>button{ background: rgba(168,85,247,.12); }
 .rec-amber .stButton>button{ background: rgba(245,158,11,.12); }
-.rec-card .stButton>button:hover{ filter:brightness(1.03); }
+.rec-card .stButton>button:hover{ filter:brightness(1.02); }
 
 .quick-menu{ padding:14px; background:#fff; border:1px dashed rgba(15,23,42,.15); border-radius:14px; }
 [data-testid="stMetricValue"]{ color:#0f172a; }
-
-/* Griglia 3→2→1 */
-.grid-3{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px; }
-@media (max-width: 1200px){ .grid-3{ grid-template-columns:1fr 1fr; } }
-@media (max-width: 780px) { .grid-3{ grid-template-columns:1fr; } }
 </style>
 """, unsafe_allow_html=True)
 
@@ -213,7 +207,6 @@ def read_uploaded_file(file) -> pd.DataFrame | None:
                 df = pd.read_csv(io.BytesIO(data), encoding=ss_get(k("encoding")), sep=",")
         except Exception:
             df = pd.read_csv(io.BytesIO(data), encoding=ss_get(k("encoding")), sep=";")
-        # normalizzazione decimali/migliaia (se utile)
         dec, tho = ss_get(k("decimal")), ss_get(k("thousands"))
         if dec in [",", "."] and tho in [",", ".", " "]:
             for c in df.columns:
@@ -268,7 +261,7 @@ ss_set_default(k("encoding"), "utf-8")
 ss_set_default(k("sniff_sep"), True)
 ss_set_default(k("decimal"), ",")
 ss_set_default(k("thousands"), ".")
-ss_set_default(k("saved"), False)   # navigazione consentita solo dopo salvataggio
+ss_set_default(k("saved"), False)   # flag: consentire la navigazione solo dopo il salvataggio
 ensure_initialized()
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -355,7 +348,7 @@ m1, m2, m3 = st.columns(3)
 with m1: st.metric("Righe", df.shape[0])
 with m2: st.metric("Colonne", df.shape[1])
 with m3: st.metric("Missing totali", int(df.isna().sum().sum()))
-st.dataframe(df.head(25), width="stretch")
+st.dataframe(df.head(25), use_container_width=True)
 
 info = detect_shape(df)
 topics = detect_topics(df)
@@ -376,30 +369,22 @@ with cC:
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.subheader("Passo 4 · 💾 Salva il dataset (obbligatorio)")
-cS1, cS2, cS3 = st.columns([1.4, 1.2, 1.2])
+cS1, cS2 = st.columns([1.5, 2])
 with cS1:
     if st.button("💾 Salva per le altre pagine", use_container_width=True, key=k("save")):
         set_uploaded(df, note="from upload page")
         st.session_state[k("saved")] = True
         st.success("Dataset salvato come ‘uploaded’ e impostato come ‘active’. Ora può scegliere il modulo.")
 with cS2:
-    st.download_button("⬇️ Scarica template CSV",
-                       pd.DataFrame({"id":[]}).to_csv(index=False).encode("utf-8"),
-                       file_name="template.csv", mime="text/csv",
-                       use_container_width=True)
-with cS3:
-    st.download_button("⬇️ Scarica esempio (studio primario)",
-                       make_sample_primary(100).to_csv(index=False).encode("utf-8"),
-                       file_name="esempio_studio_primario.csv", mime="text/csv",
-                       use_container_width=True)
-
+    if not ss_get(k("saved"), False):
+        st.warning("⚠️ Per poter proseguire, salvi prima il dataset con il pulsante a sinistra.")
 with st.expander("Stato dati", expanded=False):
     stamp_meta()
 
 saved_ok = bool(ss_get(k("saved"), False))
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Divisore netto tra salvataggio e suggerimenti
+# Divisore netto tra salvataggio e suggerimenti (richiesta)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 
@@ -407,9 +392,9 @@ st.markdown("---")
 # Consigliati per i tuoi dati (in riquadro con sfondo dedicato)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("#### ✅ Consigliati per i tuoi dati")
-st.markdown("<div class='rec-wrap'><div class='grid-3'>", unsafe_allow_html=True)
+st.markdown("<div class='rec-wrap'>", unsafe_allow_html=True)
 
-rec_cards: list[tuple[str,str,str,list[str],list[str]]] = []
+rec_cards = []
 def add_card(label: str, desc: str, color: str, primary: list[str], tokens: list[str]):
     rec_cards.append((label, desc, color, primary, tokens))
 
@@ -449,7 +434,7 @@ if "longitudinal" in topics:
     add_card("📈 Longitudinale (misure ripetute)", "Traiettorie e modelli ad effetti misti.", "rec-blue",
              ["12_📈_Longitudinale_Misure_Ripetute.py"], ["longitudinale"])
 if "panel" in topics:
-    add_card("🏷️ Panel (econometria)", "Pooled/FE/RE, Hausman, SE robuste/cluster.", "rec-amber",
+    add_card("🏷️ Panel (econometria)", "Pooled/FE/RE, Hausman, robuste/clustered SE.", "rec-amber",
              ["13_📊_Panel_Analysis.py","13_📊_Panel.py"], ["panel"])
 
 # Serie temporali
@@ -457,22 +442,30 @@ if "timeseries" in topics:
     add_card("⏱️ Serie temporali", "ARIMA/ETS, decomposizione, previsione.", "rec-violet",
              ["14_⏱️_Analisi_Serie_Temporali.py"], ["serie","temporali"])
 
-# Rendering griglia (card + bottone). Se non salvato → bottone bloccato con etichetta diversa.
-for i, (label, desc, color, prim, toks) in enumerate(rec_cards):
-    st.markdown(f"<div class='rec-card {color}'>"
-                f"<div class='title'>{label}</div>"
-                f"<div class='desc'>{desc}</div>"
-                f"</div>", unsafe_allow_html=True)
-    btn_label = label if saved_ok else "🔒 Salva per abilitare"
-    st.button(btn_label, key=k(f"rec_{i}"), use_container_width=True,
-              disabled=not saved_ok,
-              on_click=(lambda p=prim, t=toks: (set_uploaded(df, "from upload page"),
-                                                safe_switch_by_tokens(p, t))) if saved_ok else None)
+# Griglia cards consigliate (DISABILITATE se non salvato)
+if rec_cards:
+    rows = (len(rec_cards)+2)//3
+    idx = 0
+    for _ in range(rows):
+        c1, c2, c3 = st.columns(3)
+        for col in (c1, c2, c3):
+            if idx >= len(rec_cards): continue
+            label, desc, color, prim, toks = rec_cards[idx]
+            with col:
+                st.markdown(f"<div class='rec-card {color}'>"
+                            f"<div class='title'>{label}</div>"
+                            f"<div class='desc'>{desc}</div>"
+                            f"</div>", unsafe_allow_html=True)
+                st.button(label, use_container_width=True, key=k(f"rec_{idx}"),
+                          disabled=not saved_ok,
+                          on_click=(lambda p=prim, t=toks: (set_uploaded(df, "from upload page"),
+                                                            safe_switch_by_tokens(p, t))) if saved_ok else None)
+            idx += 1
 
-st.markdown("</div></div>", unsafe_allow_html=True)  # chiude grid + wrap
+st.markdown("</div>", unsafe_allow_html=True)  # chiusura rec-wrap
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Opzioni avanzate — sotto le statistiche consigliate
+# Opzioni avanzate — spostate sotto le statistiche consigliate (richiesta)
 # ──────────────────────────────────────────────────────────────────────────────
 with st.expander("Opzioni avanzate (SEM, Meta-analisi)"):
     adv1, adv2 = st.columns(2)
