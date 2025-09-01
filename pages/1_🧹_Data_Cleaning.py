@@ -58,7 +58,7 @@ def ss_set_default(name: str, value):
 ss_set_default(k("step_done"), {"colonne": False, "tipi": False, "missing": False, "duplicati": False, "outlier": False, "testo": False})
 
 # Header
-st.title("🧹 Pulizia Dati (guidata)")
+st.title("🧹 Pulizia Dati")
 ensure_initialized()
 
 # Recupero dataset iniziale: preferiamo l'ATTIVO; se assente, l'UPLOADED
