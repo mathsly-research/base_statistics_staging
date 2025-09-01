@@ -148,7 +148,7 @@ def read_uploaded_file(file) -> pd.DataFrame | None:
         st.error("Formato non supportato.")
         return None
 
-if st.button("📥 Conferma dati per poter procedere", use_container_width=True, key=k("read")) and ss_get(k("source")) == "upload":
+if st.button("📥 Rivedi dati e salva", use_container_width=True, key=k("read")) and ss_get(k("source")) == "upload":
     up = ss_get(k("raw_file"))
     if up is None:
         st.warning("Selezioni un file.")
@@ -163,7 +163,7 @@ if st.button("📥 Conferma dati per poter procedere", use_container_width=True,
 # ──────────────────────────────────────────────────────────────────────────────
 # Passo 3 · Anteprima e salvataggio
 # ──────────────────────────────────────────────────────────────────────────────
-st.subheader("Passo 3 · Anteprima dati e salva")
+st.subheader("Passo 3 · Anteprima dati e salvataggio")
 df = st.session_state.get(k("df"))
 if df is None:
     st.info("Carichi/legga un dataset per proseguire.")
