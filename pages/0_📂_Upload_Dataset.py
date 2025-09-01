@@ -78,7 +78,7 @@ st.markdown("Carichi un file **CSV/Excel**, verifichi l’anteprima e **salvi** 
 # ──────────────────────────────────────────────────────────────────────────────
 # Passo 1 · Sorgente
 # ──────────────────────────────────────────────────────────────────────────────
-st.subheader("Passo 1 · Sorgente dati")
+st.subheader("Passo 1 · Caricamento dataset")
 left, right = st.columns([2, 3], vertical_alignment="top")
 
 with left:
@@ -101,7 +101,7 @@ with right:
 # ──────────────────────────────────────────────────────────────────────────────
 # Passo 2 · Opzioni lettura
 # ──────────────────────────────────────────────────────────────────────────────
-st.subheader("Passo 2 · Opzioni di lettura")
+st.subheader("Passo 2 · Conferma dati")
 c1, c2, c3, c4 = st.columns(4)
 with c1:
     enc = st.selectbox("Encoding", ["utf-8", "latin-1", "cp1252"], index=0, key=k("encoding"))
@@ -148,7 +148,7 @@ def read_uploaded_file(file) -> pd.DataFrame | None:
         st.error("Formato non supportato.")
         return None
 
-if st.button("📥 Leggi/aggiorna", use_container_width=True, key=k("read")) and ss_get(k("source")) == "upload":
+if st.button("📥 Conferma dati per poter procedere", use_container_width=True, key=k("read")) and ss_get(k("source")) == "upload":
     up = ss_get(k("raw_file"))
     if up is None:
         st.warning("Selezioni un file.")
@@ -163,7 +163,7 @@ if st.button("📥 Leggi/aggiorna", use_container_width=True, key=k("read")) and
 # ──────────────────────────────────────────────────────────────────────────────
 # Passo 3 · Anteprima e salvataggio
 # ──────────────────────────────────────────────────────────────────────────────
-st.subheader("Passo 3 · Anteprima e salvataggio")
+st.subheader("Passo 3 · Anteprima dati e salva")
 df = st.session_state.get(k("df"))
 if df is None:
     st.info("Carichi/legga un dataset per proseguire.")
